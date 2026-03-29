@@ -143,8 +143,10 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
     # ------------------------------------------------------------------ data
     tok_path = os.path.join(data_dir, "tokenizer.json")
     train_ds, _, _ = prepare_data(tok_path, data_dir, seq_len=cfg.max_seq_len)
+    # Collection uses larger batches (no-grad forward only)
+    collect_batch = ov['phase1']['micro_batch']
     train_loader   = DataLoader(
-        train_ds, batch_size=16, shuffle=True,
+        train_ds, batch_size=collect_batch, shuffle=True,
         num_workers=num_workers, pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
     )
@@ -205,8 +207,9 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
 
         batch_size, _ = auto_calibrate_batch_size(
             _trial_p2, device, batch_size,
-            target_effective=batch_size,  # no grad_accum in P2
+            target_effective=batch_size,
             target_vram_frac=0.90,
+            max_bs=min(N, 100_000),  # P2 operates on vectors, not sequences
         )
         print(f"  Phase 2 calibrated batch_size: {batch_size}")
 
