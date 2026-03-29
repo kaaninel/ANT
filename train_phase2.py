@@ -208,8 +208,8 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
         batch_size, _ = auto_calibrate_batch_size(
             _trial_p2, device, batch_size,
             target_effective=batch_size,
-            target_vram_frac=0.90,
-            max_bs=min(N, 100_000),  # P2 operates on vectors, not sequences
+            target_vram_frac=0.85,  # conservative: B×B matrix causes spiky allocs
+            max_bs=min(N, 100_000),
         )
         print(f"  Phase 2 calibrated batch_size: {batch_size}")
 
@@ -251,7 +251,7 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
             optimizer.step()
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
-            batch_size = max(256, batch_size // 2)
+            batch_size = max(256, int(batch_size * 0.9))
             print(f"  ⚠ OOM! Reduced batch_size to {batch_size}")
             optimizer.zero_grad(set_to_none=True)
             continue

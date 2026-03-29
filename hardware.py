@@ -156,10 +156,13 @@ def build_trial_fn(model, cfg, device, use_amp, amp_dtype,
 def handle_oom(micro_batch, grad_accum, target_effective, min_bs=1):
     """
     Called when an OOM occurs during training.
+    Reduces batch by ~10% to stay close to optimal utilization.
     Returns (new_micro_batch, new_grad_accum, needs_loader_rebuild).
     """
     torch.cuda.empty_cache()
-    new_mb = max(min_bs, micro_batch // 2)
+    new_mb = max(min_bs, int(micro_batch * 0.9))
+    if new_mb == micro_batch:
+        new_mb = max(min_bs, micro_batch - 1)
     new_ga = max(1, target_effective // new_mb)
     print(f"  ⚠ OOM! Reducing micro_batch {micro_batch}→{new_mb}, "
           f"grad_accum {grad_accum}→{new_ga}")
