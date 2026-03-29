@@ -183,6 +183,9 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
     hiddens_norm = F.normalize(hiddens.float(), dim=-1)  # (N, d_model) on CPU
     hiddens = hiddens.to(device)
 
+    # Training loop
+    N = hiddens.shape[0]
+
     # Auto-calibrate batch_size for contrastive training
     if device == 'cuda':
         from hardware import auto_calibrate_batch_size
@@ -207,8 +210,6 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
         )
         print(f"  Phase 2 calibrated batch_size: {batch_size}")
 
-    # Training loop
-    N = hiddens.shape[0]
     model.train()
     timer = Timer()
     start_step = 0
