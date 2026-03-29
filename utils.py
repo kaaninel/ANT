@@ -53,6 +53,9 @@ def load_checkpoint(model, optimizer, path: str, device) -> dict:
     # from compiled models load correctly into uncompiled models (and vice-versa).
     state_dict = ckpt["model"]
     cleaned = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+    # Drop registered buffers that are recomputed from config (size may change)
+    _recomputed = {"rope_cos", "rope_sin", "text_only_mask", "mem_text_mask"}
+    cleaned = {k: v for k, v in cleaned.items() if k not in _recomputed}
     model.load_state_dict(cleaned, strict=False)
     if optimizer is not None and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
