@@ -314,14 +314,15 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
                 # Compute avg halt steps from histogram
                 total_halt = sum(halt_hist.values())
                 avg_halt = sum(k * v for k, v in halt_hist.items()) / max(total_halt, 1)
+                tok_per_sec = tokens_seen / max(elapsed, 1e-6)
                 print(
-                    f"[Phase 4] Step {step}/{total_steps} ({pct:.1f}%) | "
-                    f"LM Loss: {accum_loss:.4f} | "
-                    f"Halt: {avg_halt:.1f} steps | "
-                    f"max_s={max_act} pw={ponder_w:.3f} T={temperature:.1f} | "
-                    f"VRAM: {vram_report()} | ETA: {format_eta(eta_secs)} | "
-                    f"Elapsed: {format_time(elapsed)} | "
-                    f"Tokens: {tokens_seen/1e9:.3f}B/{total_tokens_fmt}"
+                    f"[Phase 4] Step {step}/{total_steps} ({pct:.1f}%)\n"
+                    f"  LM Loss: {accum_loss:.4f} | Halt: {avg_halt:.1f} steps\n"
+                    f"  max_s={max_act} pw={ponder_w:.3f} T={temperature:.1f}\n"
+                    f"  VRAM: {vram_report()} | Peak: {peak_vram():.1f} GB\n"
+                    f"  Tokens: {tokens_seen/1e9:.3f}B/{total_tokens_fmt} ({tok_per_sec:.0f} tok/s)\n"
+                    f"  ETA: {format_eta(eta_secs)} | Elapsed: {format_time(elapsed)}",
+                    flush=True,
                 )
                 accum_loss = 0.0
                 halt_hist.clear()

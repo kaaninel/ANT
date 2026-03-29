@@ -185,6 +185,10 @@ class MemorySystem:
         size = os.path.getsize(self._data_file)
         return size // RECORD_SIZE
 
+    def total_entries(self) -> int:
+        """Return current number of records in RAM cache."""
+        return self._n_records
+
     def _read_record(self, record_number: int) -> np.ndarray:
         return self._data_cache[record_number].copy()
 

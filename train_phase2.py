@@ -262,9 +262,10 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
             eta_secs = (pcfg.steps - step) * (elapsed / max(step - start_step, 1))
             print(
                 f"[Phase 2] Step {step}/{pcfg.steps} ({pct:.1f}%) | "
-                f"Loss: {loss.item():.4f} | "
+                f"Loss: {loss.item():.4f} | BS: {batch_size} | "
                 f"VRAM: {vram_report()} | ETA: {format_eta(eta_secs)} | "
-                f"Elapsed: {format_time(elapsed)}"
+                f"Elapsed: {format_time(elapsed)}",
+                flush=True,
             )
 
         # Periodic checkpoint for resume support

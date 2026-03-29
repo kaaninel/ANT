@@ -167,18 +167,18 @@ class Timer:
 # ---------------------------------------------------------------------------
 
 def vram_report() -> str:
-    """Return VRAM usage string like '11.2/15.9 GB'."""
+    """Return VRAM usage string showing reserved (actual footprint) / total."""
     if torch.cuda.is_available():
-        alloc = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
         total = torch.cuda.get_device_properties(0).total_memory / 1e9
-        return f"{alloc:.1f}/{total:.1f} GB"
+        return f"{reserved:.1f}/{total:.1f} GB"
     return "N/A"
 
 
 def peak_vram() -> float:
-    """Return peak VRAM usage in GB."""
+    """Return peak VRAM reserved in GB (actual GPU footprint)."""
     if torch.cuda.is_available():
-        return torch.cuda.max_memory_allocated() / 1e9
+        return torch.cuda.max_memory_reserved() / 1e9
     return 0.0
 
 

@@ -484,15 +484,16 @@ def train(
                 eta_secs = (total_steps - step) * (elapsed / max(step, 1))
                 total_halt = sum(halt_hist.values())
                 avg_halt = sum(k * v for k, v in halt_hist.items()) / max(total_halt, 1)
+                tok_per_sec = tokens_seen / max(elapsed, 1e-6)
                 print(
-                    f"[Phase 5] Step {step}/{total_steps} ({pct:.1f}%) | "
-                    f"Loss: {accum_loss:.4f} | "
-                    f"Halt: {avg_halt:.1f} steps | "
-                    f"max_s={max_act} pw={ponder_w:.3f} T={temperature:.2f} | "
-                    f"MemWrites: {total_mem_writes:,} | "
-                    f"VRAM: {vram_report()} | ETA: {format_eta(eta_secs)} | "
-                    f"Elapsed: {format_time(elapsed)} | "
-                    f"Tokens: {tokens_seen/1e9:.3f}B/{total_tokens_fmt}"
+                    f"[Phase 5] Step {step}/{total_steps} ({pct:.1f}%)\n"
+                    f"  Loss: {accum_loss:.4f} | Halt: {avg_halt:.1f} steps\n"
+                    f"  max_s={max_act} pw={ponder_w:.3f} T={temperature:.2f}\n"
+                    f"  MemWrites: {total_mem_writes:,}\n"
+                    f"  VRAM: {vram_report()} | Peak: {peak_vram():.1f} GB\n"
+                    f"  Tokens: {tokens_seen/1e9:.3f}B/{total_tokens_fmt} ({tok_per_sec:.0f} tok/s)\n"
+                    f"  ETA: {format_eta(eta_secs)} | Elapsed: {format_time(elapsed)}",
+                    flush=True,
                 )
                 accum_loss = 0.0
                 halt_hist.clear()

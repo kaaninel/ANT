@@ -376,16 +376,21 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
                 pct = 100.0 * step / total_steps
                 eta_secs = (total_steps - step) * (elapsed / max(step, 1))
                 avg_loss = accum_loss / log_interval
+                tok_per_sec = tokens_seen / max(elapsed, 1e-6)
+                mem_entries = train_memory.total_entries() if hasattr(train_memory, 'total_entries') else -1
                 print(
-                    f"[Phase 3] Step {step}/{total_steps} ({pct:.1f}%) | "
-                    f"Loss: {avg_loss:.4f} | "
-                    f"LR: {lr:.2e} | VRAM: {vram_report()} | "
-                    f"ETA: {format_eta(eta_secs)} | Elapsed: {format_time(elapsed)} | "
-                    f"Tokens: {tokens_seen/1e9:.3f}B/{total_tokens_fmt}"
+                    f"[Phase 3] Step {step}/{total_steps} ({pct:.1f}%)\n"
+                    f"  Loss: {avg_loss:.4f} | LR: {lr:.2e}\n"
+                    f"  VRAM: {vram_report()} | Peak: {peak_vram():.1f} GB\n"
+                    f"  Tokens: {tokens_seen/1e9:.3f}B/{total_tokens_fmt} ({tok_per_sec:.0f} tok/s)\n"
+                    f"  Memory entries: {mem_entries} | Batch: {micro_batch}×{grad_accum}\n"
+                    f"  ETA: {format_eta(eta_secs)} | Elapsed: {format_time(elapsed)}",
+                    flush=True,
                 )
                 accum_loss = 0.0
 
             if step % pcfg.eval_interval == 0:
+                torch.cuda.empty_cache()
                 # Refresh eval memory snapshot
                 if step % pcfg.eval_memory_refresh_interval == 0:
                     train_memory.flush_to_disk()
@@ -395,8 +400,11 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
 
                 metrics = evaluate_with_memory(model, val_loader, eval_memory, device)
                 print(
-                    f"  [eval] no_mem ppl={metrics['ppl_no_mem']:.2f}  "
-                    f"mem ppl={metrics['ppl_mem']:.2f}"
+                    f"  [eval @ step {step}]\n"
+                    f"    No-mem  loss={metrics['loss_no_mem']:.4f}  ppl={metrics['ppl_no_mem']:.2f}\n"
+                    f"    W/mem   loss={metrics['loss_mem']:.4f}  ppl={metrics['ppl_mem']:.2f}\n"
+                    f"    Δ ppl: {metrics['ppl_no_mem'] - metrics['ppl_mem']:+.2f} (negative = memory helps)",
+                    flush=True,
                 )
 
                 if metrics["loss_mem"] < best_loss:
