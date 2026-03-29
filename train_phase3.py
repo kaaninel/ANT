@@ -360,7 +360,7 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
                         addrs_b = [addr_cpu[h][b].tobytes() for h in range(len(addr_heads))]
                         train_memory.write_memory(addrs_b, vecs_np[b])
 
-            if step % 500 == 0:
+            if step % 500 == 0 or step == 1:
                 elapsed = timer.elapsed()
                 pct = 100.0 * step / total_steps
                 eta_secs = (total_steps - step) * (elapsed / max(step, 1))
