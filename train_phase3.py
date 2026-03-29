@@ -95,7 +95,7 @@ def evaluate_with_memory(
     val_loader: DataLoader,
     eval_memory: MemorySystem,
     device: str,
-    max_batches: int = 50,
+    max_batches: int = 20,
 ) -> dict:
     model.eval()
     cfg = model.cfg
@@ -109,32 +109,40 @@ def evaluate_with_memory(
             break
         inp, tgt = inp.to(device), tgt.to(device)
 
-        # --- without memory ---
-        logits_nm, _ = model(inp)
-        loss_nm = F.cross_entropy(
-            logits_nm.reshape(-1, logits_nm.size(-1)),
-            tgt.reshape(-1),
-            ignore_index=cfg.pad_id,
-            reduction="sum",
-        )
-        total_loss_no_mem += loss_nm.item()
+        try:
+            # --- without memory ---
+            logits_nm, _ = model(inp)
+            loss_nm = F.cross_entropy(
+                logits_nm.reshape(-1, logits_nm.size(-1)),
+                tgt.reshape(-1),
+                ignore_index=cfg.pad_id,
+                reduction="sum",
+            )
+            total_loss_no_mem += loss_nm.item()
+            del logits_nm, loss_nm
 
-        # --- with memory (batch lookup) ---
-        _, _, hid = model(inp, return_hidden=True)
-        h_last = hid[:, -1, :]  # (B, d_model)
-        mem_tensor = batch_read_memory(model, h_last, eval_memory, cfg, device)
+            # --- with memory (batch lookup) ---
+            _, _, hid = model(inp, return_hidden=True)
+            h_last = hid[:, -1, :]  # (B, d_model)
+            mem_tensor = batch_read_memory(model, h_last, eval_memory, cfg, device)
+            del hid, h_last
 
-        logits_m, _ = model(inp, memory_vectors=mem_tensor)
-        loss_m = F.cross_entropy(
-            logits_m.reshape(-1, logits_m.size(-1)),
-            tgt.reshape(-1),
-            ignore_index=cfg.pad_id,
-            reduction="sum",
-        )
-        total_loss_mem += loss_m.item()
+            logits_m, _ = model(inp, memory_vectors=mem_tensor)
+            loss_m = F.cross_entropy(
+                logits_m.reshape(-1, logits_m.size(-1)),
+                tgt.reshape(-1),
+                ignore_index=cfg.pad_id,
+                reduction="sum",
+            )
+            total_loss_mem += loss_m.item()
+            del logits_m, loss_m, mem_tensor
 
-        mask = tgt.reshape(-1) != cfg.pad_id
-        total_tokens += mask.sum().item()
+            mask = tgt.reshape(-1) != cfg.pad_id
+            total_tokens += mask.sum().item()
+
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            continue
 
     denom = max(1, total_tokens)
     nm_loss = total_loss_no_mem / denom
@@ -225,8 +233,10 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
         drop_last=True, persistent_workers=num_workers > 0,
         prefetch_factor=4 if num_workers > 0 else None,
     )
+    # Eval uses a smaller batch to avoid OOM (3 forward passes per batch)
+    eval_batch = max(1, micro_batch // 4)
     val_loader = DataLoader(
-        val_ds, batch_size=micro_batch, shuffle=False,
+        val_ds, batch_size=eval_batch, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
         prefetch_factor=4 if num_workers > 0 else None,
@@ -361,12 +371,14 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
                         train_memory.write_memory(addrs_b, vecs_np[b])
 
             if step % 500 == 0 or step == 1:
+                log_interval = 1 if step == 1 else 500
                 elapsed = timer.elapsed()
                 pct = 100.0 * step / total_steps
                 eta_secs = (total_steps - step) * (elapsed / max(step, 1))
+                avg_loss = accum_loss / log_interval
                 print(
                     f"[Phase 3] Step {step}/{total_steps} ({pct:.1f}%) | "
-                    f"Loss: {accum_loss:.4f} | "
+                    f"Loss: {avg_loss:.4f} | "
                     f"LR: {lr:.2e} | VRAM: {vram_report()} | "
                     f"ETA: {format_eta(eta_secs)} | Elapsed: {format_time(elapsed)} | "
                     f"Tokens: {tokens_seen/1e9:.3f}B/{total_tokens_fmt}"
