@@ -94,7 +94,7 @@ def _t4_config(info):
 def _a100_40gb_config(info):
     """A100-40GB: bf16, 312 TFLOPS bf16"""
     return {
-        'phase1': {'micro_batch': 256, 'grad_accum': 1},
+        'phase1': {'micro_batch': 160, 'grad_accum': 1},
         'phase2': {'batch_size': 16000},
         'phase3': {'micro_batch': 192, 'grad_accum': 1},
         'phase4': {'micro_batch': 96, 'grad_accum': 1},
@@ -109,7 +109,7 @@ def _a100_40gb_config(info):
 def _a100_80gb_config(info):
     """A100-80GB: bf16, plenty of room"""
     return {
-        'phase1': {'micro_batch': 512, 'grad_accum': 1},
+        'phase1': {'micro_batch': 320, 'grad_accum': 1},
         'phase2': {'batch_size': 32000},
         'phase3': {'micro_batch': 384, 'grad_accum': 1},
         'phase4': {'micro_batch': 192, 'grad_accum': 1},
