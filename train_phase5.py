@@ -416,7 +416,7 @@ def train(
     halt_hist = Counter()
     total_mem_writes = 0
 
-    if use_compile:
+    if ov.get('use_compile'):
         print("  ⏳ First step will trigger torch.compile (may take 1-3 min)…", flush=True)
 
     try:
