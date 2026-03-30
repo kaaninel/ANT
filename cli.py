@@ -101,13 +101,18 @@ def load_model(checkpoint_dir: str, data_dir: str, device: torch.device):
     model = LoopedLatentController(cfg, use_checkpoint=False).to(device)
     param_count = sum(p.numel() for p in model.parameters())
 
-    # Find best checkpoint (prefer inference-only, fall back to full)
+    # Find best checkpoint (prefer inference-only, fall back to full, then latest)
     loaded_phase = None
     for phase in [5, 4, 3, 1]:
-        infer_ckpt = os.path.join(checkpoint_dir, f"phase{phase}", "best.inference.pt")
-        full_ckpt = os.path.join(checkpoint_dir, f"phase{phase}", "best.pt")
-        ckpt = infer_ckpt if os.path.exists(infer_ckpt) else full_ckpt
-        if os.path.exists(ckpt):
+        phase_dir = os.path.join(checkpoint_dir, f"phase{phase}")
+        candidates = [
+            os.path.join(phase_dir, "best.inference.pt"),
+            os.path.join(phase_dir, "best.pt"),
+            os.path.join(phase_dir, "latest.inference.pt"),
+            os.path.join(phase_dir, "latest.pt"),
+        ]
+        ckpt = next((c for c in candidates if os.path.exists(c)), None)
+        if ckpt is not None:
             ckpt_data = torch.load(ckpt, map_location=device, weights_only=False)
             # Load model weights
             state_dict = ckpt_data["model"]
@@ -118,15 +123,23 @@ def load_model(checkpoint_dir: str, data_dir: str, device: torch.device):
                 for i, h in enumerate(model.addr_heads):
                     h.load_state_dict(ckpt_data["addr_heads"][i])
             elif phase >= 3:
-                for ext in ["best.inference.pt", "best.pt"]:
-                    p2 = os.path.join(checkpoint_dir, "phase2", ext)
+                # Try dedicated addr_heads file first, then checkpoints
+                p2_candidates = [
+                    os.path.join(checkpoint_dir, "phase2", "addr_heads.pt"),
+                    os.path.join(checkpoint_dir, "phase2", "best.inference.pt"),
+                    os.path.join(checkpoint_dir, "phase2", "best.pt"),
+                    os.path.join(checkpoint_dir, "phase2", "latest.pt"),
+                ]
+                for p2 in p2_candidates:
                     if os.path.exists(p2):
                         p2_data = torch.load(p2, map_location=device, weights_only=False)
                         if "addr_heads" in p2_data:
                             for i, h in enumerate(model.addr_heads):
                                 h.load_state_dict(p2_data["addr_heads"][i])
-                        break
+                            print(f"  Loaded address heads from {p2}")
+                            break
             loaded_phase = phase
+            ckpt_name = os.path.basename(ckpt)
             break
 
     if loaded_phase is None:
@@ -135,7 +148,7 @@ def load_model(checkpoint_dir: str, data_dir: str, device: torch.device):
         sys.exit(1)
 
     model.eval()
-    print(f"  Model: {param_count/1e6:.1f}M params, Phase {loaded_phase} checkpoint")
+    print(f"  Model: {param_count/1e6:.1f}M params, Phase {loaded_phase} ({ckpt_name})")
     return model, tokenizer, cfg
 
 
