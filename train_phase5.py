@@ -293,11 +293,10 @@ def train(
                 p.requires_grad_(True)
         print("Loaded Phase 2 address heads (UNFROZEN for Phase 5)")
 
-    # ------------------------------------------------ torch.compile
-    use_compile = ov.get('use_compile') if ov else False
-    if use_compile and hasattr(torch, 'compile'):
-        print("Compiling model with torch.compile...")
-        model = torch.compile(model, mode='default')
+    # torch.compile disabled for Phase 5: the ACT loop accumulates 4 forward
+    # passes into weighted_logits, creating a graph the inductor partitioner
+    # can't handle (PyTorch 2.10 bug: "Node add_N was invalid, but is output").
+    # Phases 1/3/4 use compile fine since they have simpler single-pass graphs.
 
     # ------------------------------------------------ auto-calibrate batch size
     # The ACT loop runs max_steps forward passes (4 by default), each holding
