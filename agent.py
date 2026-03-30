@@ -50,6 +50,8 @@ class Agent:
         # Internal state
         self.h = torch.zeros(self.cfg.d_model, device=device)
         self.context_buffer: List[int] = []  # rolling, max n_text_positions tokens
+        self.kv_cache: list | None = None    # KV-cache for incremental decoding
+        self.cache_seq_len: int = 0          # number of positions cached
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -90,6 +92,8 @@ class Agent:
            Re-read memory between ACT steps.
         4. Write hidden state (int8) to memory at 3 addresses.
         5. Emit: if top1_prob > emit_threshold → sample and return token; else None.
+        
+        Uses KV-cache for incremental decoding when available.
         """
         HALT = 1
 
@@ -100,16 +104,38 @@ class Agent:
         self.context_buffer.append(token_id)
         if len(self.context_buffer) > self.cfg.n_text_positions:
             self.context_buffer = self.context_buffer[-self.cfg.n_text_positions:]
-
-        inp = self._build_input()
+            # Context was truncated, invalidate KV-cache
+            self.kv_cache = None
+            self.cache_seq_len = 0
 
         # Step 3: ACT hard halting
         final_logits = None
         for act_step in range(self.max_act_steps):
             mem_tensor = self._build_mem_tensor(mem_vecs)
-            logits, halt_logits, hidden = self.model(
-                inp, memory_vectors=mem_tensor, return_hidden=True
-            )
+            n_mem_positions = mem_tensor.shape[1] + 2  # +2 for <MEM> </MEM>
+
+            if self.kv_cache is not None and act_step == 0:
+                # Incremental: only process the new token
+                inp = torch.tensor([[token_id]], dtype=torch.long, device=self.device)
+                logits, halt_logits, hidden, new_cache = self.model(
+                    inp, memory_vectors=None,
+                    return_hidden=True,
+                    kv_cache=self.kv_cache,
+                    cache_position=self.cache_seq_len,
+                )
+                self.kv_cache = new_cache
+                self.cache_seq_len += 1
+            else:
+                # Full context: first token or ACT re-read (memory changed)
+                # Pass kv_cache=[] to trigger prefill (returns cache)
+                inp = self._build_input()
+                logits, halt_logits, hidden, new_cache = self.model(
+                    inp, memory_vectors=mem_tensor, return_hidden=True,
+                    kv_cache=[], cache_position=0,
+                )
+                self.kv_cache = new_cache
+                self.cache_seq_len = n_mem_positions + len(self.context_buffer)
+
             final_logits = logits
 
             # Update internal hidden state from last text position
@@ -119,8 +145,10 @@ class Agent:
             if halt_prob > 0.5 or act_step == self.max_act_steps - 1:
                 break
 
-            # Re-read memory for next ACT step
+            # Re-read memory for next ACT step — invalidates cache
             mem_vecs = self._read_memory()
+            self.kv_cache = None
+            self.cache_seq_len = 0
 
         # Step 4: write hidden state to memory
         self._write_memory()

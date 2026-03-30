@@ -87,7 +87,8 @@ class Attention(nn.Module):
         mask: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> torch.Tensor:
+        kv_cache: tuple | None = None,
+    ) -> tuple:
         B, T, _ = x.shape
         H, D = self.n_heads, self.head_dim
 
@@ -99,9 +100,16 @@ class Attention(nn.Module):
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
 
+        # KV-cache: append new K,V to cached K,V
+        if kv_cache is not None:
+            cached_k, cached_v = kv_cache
+            k = torch.cat([cached_k, k], dim=2)
+            v = torch.cat([cached_v, v], dim=2)
+        new_cache = (k, v)
+
         # Use PyTorch's fused SDPA (dispatches to Flash Attention when available).
         # Pass the additive float mask (0 = attend, -1e9 = block) directly.
-        attn_mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
+        attn_mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T_q, T_kv)
 
         out = F.scaled_dot_product_attention(
             q, k, v,
@@ -111,7 +119,7 @@ class Attention(nn.Module):
         )
 
         out = out.transpose(1, 2).reshape(B, T, H * D)
-        return self.o(out)
+        return self.o(out), new_cache
 
 
 # ---------------------------------------------------------------------------
@@ -133,10 +141,12 @@ class TransformerBlock(nn.Module):
         mask: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> torch.Tensor:
-        x = x + self.drop(self.attn(self.norm1(x), mask, cos, sin))
+        kv_cache: tuple | None = None,
+    ) -> tuple:
+        attn_out, new_cache = self.attn(self.norm1(x), mask, cos, sin, kv_cache)
+        x = x + self.drop(attn_out)
         x = x + self.drop(self.ffn(self.norm2(x)))
-        return x
+        return x, new_cache
 
 
 # ---------------------------------------------------------------------------
@@ -204,11 +214,16 @@ class LoopedLatentController(nn.Module):
         token_ids: torch.Tensor,
         memory_vectors: torch.Tensor | None = None,
         return_hidden: bool = False,
+        kv_cache: list | None = None,
+        cache_position: int = 0,
     ):
         """
         token_ids      : (B, T_text)
         memory_vectors : (B, n_mem, d_model) float — raw 512-dim embeddings
-        Returns (logits, halt_logits) or (logits, halt_logits, hidden).
+        kv_cache       : list of (k, v) tuples per layer, or None
+        cache_position : position offset for RoPE when using KV-cache
+        Returns (logits, halt_logits[, hidden][, new_kv_cache]).
+        When kv_cache is not None, returns new_kv_cache as last element.
         logits cover text positions only.
         """
         B, T_text = token_ids.shape
@@ -227,20 +242,41 @@ class LoopedLatentController(nn.Module):
             )
             x = torch.cat([mem_start, memory_vectors, mem_end, x], dim=1)
 
-        T = x.shape[1]
-        if n_mem == 0:
-            mask = self.text_only_mask[:T_text, :T_text]
+        T_new = x.shape[1]  # tokens being processed this call
+
+        # Determine if this is a prefill (first call, populating cache) or incremental
+        is_prefill = kv_cache is not None and cache_position == 0
+        is_incremental = kv_cache is not None and cache_position > 0
+
+        if is_incremental:
+            # Incremental decoding: only process new token(s)
+            cos = self.rope_cos[cache_position:cache_position + T_new]
+            sin = self.rope_sin[cache_position:cache_position + T_new]
+            T_total = cache_position + T_new
+            # New text tokens attend to all cached positions + themselves causally
+            mask = torch.zeros(T_new, T_total, device=device)
+            for i in range(T_new):
+                pos = cache_position + i
+                mask[i, pos + 1:] = -1e9
         else:
-            mask = self.mem_text_mask[:T, :T]
-
-        cos = self.rope_cos[:T]
-        sin = self.rope_sin[:T]
-
-        for layer in self.layers:
-            if self.use_checkpoint and self.training:
-                x = checkpoint(layer, x, mask, cos, sin, use_reentrant=False)
+            # Full context processing (training, or prefill for cache)
+            cos = self.rope_cos[:T_new]
+            sin = self.rope_sin[:T_new]
+            if n_mem == 0:
+                mask = self.text_only_mask[:T_text, :T_text]
             else:
-                x = layer(x, mask, cos, sin)
+                mask = self.mem_text_mask[:T_new, :T_new]
+
+        new_kv_cache = []
+        for i, layer in enumerate(self.layers):
+            layer_cache = kv_cache[i] if kv_cache is not None and i < len(kv_cache) else None
+            if self.use_checkpoint and self.training:
+                # Gradient checkpointing (training only, no KV-cache)
+                x, _ = checkpoint(layer, x, mask, cos, sin, use_reentrant=False)
+                new_kv_cache.append(None)
+            else:
+                x, layer_kv = layer(x, mask, cos, sin, kv_cache=layer_cache)
+                new_kv_cache.append(layer_kv)
 
         hidden = self.norm(x)
 
@@ -250,6 +286,10 @@ class LoopedLatentController(nn.Module):
         logits = F.linear(text_hidden, self.embed.weight)
         halt_logits = self.halt_head(text_hidden)       # (B, T_text, 2)
 
+        if kv_cache is not None:
+            if return_hidden:
+                return logits, halt_logits, hidden, new_kv_cache
+            return logits, halt_logits, new_kv_cache
         if return_hidden:
             return logits, halt_logits, hidden
         return logits, halt_logits
