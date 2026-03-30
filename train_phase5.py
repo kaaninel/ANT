@@ -62,9 +62,6 @@ def streaming_act_forward(
       2. Compute halt weights (soft halting with temperature)
       3. Re-read memory from updated hidden states for next step
 
-    Uses gradient checkpointing per ACT step to avoid holding all 4 forward
-    pass graphs in memory simultaneously (~55GB savings on A100).
-
     Returns (weighted_logits, expected_steps, halt_counts, final_hidden).
     """
     B, T = inp.shape
@@ -77,28 +74,12 @@ def streaming_act_forward(
     halt_step_counts = Counter()
     final_hidden = None
 
-    def _act_step(inp_t, mem_t, remaining_t, step_idx_t):
-        """Single ACT step — wrapped for gradient checkpointing."""
-        logits, halt_logits, hidden = model(
-            inp_t, memory_vectors=mem_t, return_hidden=True
-        )
-        halt_prob = F.softmax(halt_logits / max(temperature, 1e-6), dim=-1)[..., HALT]
-        return logits, halt_prob, hidden
-
     for i in range(max_steps):
-        step_idx = torch.tensor(i, device=device)
-
-        if model.training:
-            # Checkpoint: recompute this ACT step during backward instead of
-            # holding all 4 forward pass activation graphs simultaneously
-            logits, halt_prob, hidden = torch.utils.checkpoint.checkpoint(
-                _act_step, inp, mem_tensor, remaining, step_idx,
-                use_reentrant=False,
-            )
-        else:
-            logits, halt_prob, hidden = _act_step(inp, mem_tensor, remaining, step_idx)
-
+        logits, halt_logits, hidden = model(
+            inp, memory_vectors=mem_tensor, return_hidden=True
+        )
         final_hidden = hidden
+        halt_prob = F.softmax(halt_logits / max(temperature, 1e-6), dim=-1)[..., HALT]
 
         if i < max_steps - 1:
             w = remaining * halt_prob
@@ -312,11 +293,16 @@ def train(
                 p.requires_grad_(True)
         print("Loaded Phase 2 address heads (UNFROZEN for Phase 5)")
 
-    # NOTE: torch.compile is disabled for Phase 5 because it conflicts with
-    # torch.utils.checkpoint inside the ACT loop (PyTorch partitioner bug).
-    # The ACT-level gradient checkpointing is more important (saves ~55GB VRAM).
+    # ------------------------------------------------ torch.compile
+    use_compile = ov.get('use_compile') if ov else False
+    if use_compile and hasattr(torch, 'compile'):
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model, mode='default')
 
     # ------------------------------------------------ auto-calibrate batch size
+    # The ACT loop runs max_steps forward passes (4 by default), each holding
+    # activation graphs for backward. Peak VRAM ≈ 28GB static + 0.55GB/batch_element.
+    # Target 60% so calibrator finds a safe batch size with margin for variance.
     max_curriculum_steps = max(s[1] for s in pcfg.ponder_curriculum)
     target_effective = micro_batch * grad_accum
     if device == 'cuda':
@@ -325,7 +311,7 @@ def train(
         micro_batch, grad_accum = auto_calibrate_batch_size(
             trial, device, micro_batch,
             target_effective=target_effective,
-            target_vram_frac=0.80,
+            target_vram_frac=0.70,
         )
 
     train_loader = DataLoader(
@@ -534,6 +520,11 @@ def train(
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
+
+                # Defragment VRAM periodically — the ACT loop's peak allocation
+                # pattern causes fragmentation that accumulates across steps
+                if step % 100 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
                 # Logging — every step
                 if step % pcfg.log_interval == 0:
