@@ -109,9 +109,9 @@ class Phase5Config:
     grad_accum: int = 16
     total_tokens: int = 2_000_000_000
     max_grad_norm: float = 1.0
-    eval_interval: int = 5000
-    save_interval: int = 10000
-    log_interval: int = 10
+    eval_interval: int = 1000
+    save_interval: int = 1000
+    log_interval: int = 1
 
     # Address head learning rate multiplier (slower to prevent address drift)
     addr_head_lr_mult: float = 0.3
@@ -136,9 +136,9 @@ class Gen1Config(Phase5Config):
     """Gen 1: Memory QA training on bAbI + SQuAD + TinyStories replay."""
     total_tokens: int = 500_000_000
     lr: float = 5e-5
-    eval_interval: int = 2000
-    save_interval: int = 5000
-    log_interval: int = 10
+    eval_interval: int = 500
+    save_interval: int = 500
+    log_interval: int = 1
 
 
 @dataclass
