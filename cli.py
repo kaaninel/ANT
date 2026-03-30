@@ -254,12 +254,12 @@ def run_interactive(orch: Orchestrator, args):
                 continue
 
         # ── Generation ──
-        t0 = time.perf_counter()
         agent = orch.create_agent(
             max_act_steps=args.act_steps,
             emit_threshold=args.emit_threshold,
         )
         orch.feed(agent, user_input)
+        t0 = time.perf_counter()
         response = orch.generate(agent, max_tokens=args.max_tokens,
                                  temperature=args.temperature, top_k=args.top_k,
                                  repetition_penalty=args.repetition_penalty)

@@ -59,36 +59,34 @@ class Orchestrator:
                  repetition_penalty: float = 1.3) -> str:
         """
         Drive the agent to emit tokens until EOS or max_tokens.
-        Uses temperature sampling with top-k and repetition penalty.
-        Detects degenerate n-gram loops and stops early.
+        Uses force_emit=True so every forward pass produces a token
+        (emit_threshold is for streaming input, not generation).
         """
         eos_id = self.tokenizer.token_to_id("<eos>") or 1
 
         emitted: List[int] = []
 
-        for _ in range(max_tokens):
-            if emitted:
-                out = agent.process_token(emitted[-1], temperature=temperature,
-                                          top_k=top_k,
-                                          repetition_penalty=repetition_penalty,
-                                          recent_tokens=emitted)
-            else:
-                if agent.context_buffer:
-                    out = agent.process_token(
-                        agent.context_buffer[-1], temperature=temperature,
-                        top_k=top_k, repetition_penalty=repetition_penalty,
-                        recent_tokens=emitted,
-                    )
-                else:
-                    out = agent.process_token(
-                        self.tokenizer.token_to_id("<bos>") or 2,
-                        temperature=temperature, top_k=top_k,
-                        repetition_penalty=repetition_penalty,
-                        recent_tokens=emitted,
-                    )
-            if out is None:
-                continue
-            if out == eos_id:
+        # Kick off generation: process last context token (or BOS)
+        if agent.context_buffer:
+            seed_token = agent.context_buffer[-1]
+        else:
+            seed_token = self.tokenizer.token_to_id("<bos>") or 2
+
+        out = agent.process_token(seed_token, temperature=temperature,
+                                  top_k=top_k, repetition_penalty=repetition_penalty,
+                                  recent_tokens=emitted, force_emit=True)
+        if out is not None and out != eos_id:
+            emitted.append(out)
+
+        # Generate remaining tokens: feed last emitted → get next
+        for _ in range(max_tokens - 1):
+            if not emitted:
+                break
+            out = agent.process_token(emitted[-1], temperature=temperature,
+                                      top_k=top_k,
+                                      repetition_penalty=repetition_penalty,
+                                      recent_tokens=emitted, force_emit=True)
+            if out is None or out == eos_id:
                 break
             emitted.append(out)
 
