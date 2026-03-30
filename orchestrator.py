@@ -59,14 +59,17 @@ class Orchestrator:
                  repetition_penalty: float = 1.3) -> str:
         """
         Drive the agent to emit tokens until EOS or max_tokens.
-        Uses force_emit=True so every forward pass produces a token
-        (emit_threshold is for streaming input, not generation).
+        Respects emit_threshold: if model is uncertain, the token is
+        consumed (state updated) but not emitted to output.
         """
         eos_id = self.tokenizer.token_to_id("<eos>") or 1
+        noop_id = self.tokenizer.token_to_id("<noop>") or 6
 
         emitted: List[int] = []
+        consecutive_noop = 0
+        max_noop = 20  # stop if model refuses to emit for too long
 
-        # Kick off generation: process last context token (or BOS)
+        # Kick off: process last context token to get first output
         if agent.context_buffer:
             seed_token = agent.context_buffer[-1]
         else:
@@ -74,23 +77,33 @@ class Orchestrator:
 
         out = agent.process_token(seed_token, temperature=temperature,
                                   top_k=top_k, repetition_penalty=repetition_penalty,
-                                  recent_tokens=emitted, force_emit=True)
+                                  recent_tokens=emitted)
         if out is not None and out != eos_id:
             emitted.append(out)
+            consecutive_noop = 0
+        else:
+            consecutive_noop += 1
 
-        # Generate remaining tokens: feed last emitted → get next
         for _ in range(max_tokens - 1):
-            if not emitted:
+            if consecutive_noop >= max_noop:
                 break
-            out = agent.process_token(emitted[-1], temperature=temperature,
+
+            # Feed last emitted token, or noop if model didn't emit
+            feed_token = emitted[-1] if emitted else noop_id
+            out = agent.process_token(feed_token, temperature=temperature,
                                       top_k=top_k,
                                       repetition_penalty=repetition_penalty,
-                                      recent_tokens=emitted, force_emit=True)
-            if out is None or out == eos_id:
+                                      recent_tokens=emitted)
+            if out is None:
+                consecutive_noop += 1
+                continue
+            if out == eos_id:
                 break
-            emitted.append(out)
 
-            # Detect degenerate n-gram loop (e.g. "kid kid kid kid")
+            emitted.append(out)
+            consecutive_noop = 0
+
+            # Detect degenerate n-gram loop
             if len(emitted) >= 12:
                 for n in (1, 2, 3):
                     tail = emitted[-6*n:]

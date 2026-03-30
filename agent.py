@@ -51,11 +51,11 @@ class Agent:
         self.h = torch.zeros(self.cfg.d_model, device=device)
         self.context_buffer: List[int] = []  # rolling, max n_text_positions tokens
 
-        # Split KV-cache: memory and text cached separately
-        self.mem_kv_cache: list | None = None   # per-layer (k, v) for memory positions
-        self.text_kv_cache: list | None = None  # per-layer (k, v) for text positions
-        self.n_mem_positions: int = 0           # always 11 when cache is active
-        self.text_cache_len: int = 0            # number of text positions cached
+        # KV-cache: stored as combined [mem|text] to avoid split/combine overhead.
+        # Only split on ACT re-read (rare path).
+        self.kv_cache: list | None = None     # per-layer (k, v) combined
+        self.n_mem_positions: int = 0         # memory prefix length in cache
+        self.text_cache_len: int = 0          # text positions in cache
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -83,25 +83,9 @@ class Agent:
         return memory_vecs_to_tensor(mem_vecs, self.cfg.d_model, self.device)
 
     def _invalidate_cache(self):
-        self.mem_kv_cache = None
-        self.text_kv_cache = None
+        self.kv_cache = None
         self.n_mem_positions = 0
         self.text_cache_len = 0
-
-    def _combine_kv(self, mem_kv, text_kv):
-        """Combine separate memory and text K,V caches into a single cache."""
-        return [
-            (torch.cat([mk, tk], dim=2), torch.cat([mv, tv], dim=2))
-            for (mk, mv), (tk, tv) in zip(mem_kv, text_kv)
-        ]
-
-    def _split_kv(self, combined_kv, n_mem):
-        """Split combined K,V cache into memory and text portions."""
-        mem_kvs, text_kvs = [], []
-        for k, v in combined_kv:
-            mem_kvs.append((k[:, :, :n_mem, :], v[:, :, :n_mem, :]))
-            text_kvs.append((k[:, :, n_mem:, :], v[:, :, n_mem:, :]))
-        return mem_kvs, text_kvs
 
     # ------------------------------------------------------------------
     # process_token
@@ -135,63 +119,55 @@ class Agent:
             self.context_buffer = self.context_buffer[-self.cfg.n_text_positions:]
             self._invalidate_cache()
 
-        # Step 3: ACT hard halting with split KV-cache
+        # Step 3: ACT hard halting
         final_logits = None
         for act_step in range(self.max_act_steps):
-            has_cache = self.text_kv_cache is not None
+            has_cache = self.kv_cache is not None
 
             if has_cache and act_step == 0:
-                # INCREMENTAL: reuse stale mem K,V + cached text K,V + 1 new token
-                # (mem K,V from previous token — same as pre-split-cache behavior)
-                combined = self._combine_kv(self.mem_kv_cache, self.text_kv_cache)
-                n_mem = self.n_mem_positions
-                cache_pos = n_mem + self.text_cache_len
-
+                # INCREMENTAL: pass combined cache directly — no split/combine
+                cache_pos = self.n_mem_positions + self.text_cache_len
                 inp = torch.tensor([[token_id]], dtype=torch.long, device=self.device)
-                logits, halt_logits, hidden, returned_cache = self.model(
+                logits, halt_logits, hidden, self.kv_cache = self.model(
                     inp, memory_vectors=None, return_hidden=True,
-                    kv_cache=combined, cache_position=cache_pos,
+                    kv_cache=self.kv_cache, cache_position=cache_pos,
                 )
-
-                self.mem_kv_cache, self.text_kv_cache = self._split_kv(returned_cache, n_mem)
                 self.text_cache_len += 1
 
             elif has_cache and act_step > 0:
-                # ACT RE-READ: fresh memory K,V + cached text K,V (minus last)
-                # + reprocess last text token. Cost: 11 + 1 positions vs 11+T.
+                # ACT RE-READ: replace memory prefix with fresh K,V
                 mem_tensor = self._build_mem_tensor(mem_vecs)
                 n_mem = mem_tensor.shape[1] + 2
                 new_mem_kv = self.model.forward_memory(mem_tensor)
 
-                stripped_text_kv = [
-                    (k[:, :, :-1, :], v[:, :, :-1, :])
-                    for k, v in self.text_kv_cache
+                # Rebuild cache: new_mem_kv + old text (minus last position)
+                n_old_mem = self.n_mem_positions
+                text_end = n_old_mem + self.text_cache_len - 1  # exclude last
+                rebuilt = [
+                    (torch.cat([mk, k[:, :, n_old_mem:text_end, :]], dim=2),
+                     torch.cat([mv, v[:, :, n_old_mem:text_end, :]], dim=2))
+                    for (mk, mv), (k, v) in zip(new_mem_kv, self.kv_cache)
                 ]
-                combined = self._combine_kv(new_mem_kv, stripped_text_kv)
                 cache_pos = n_mem + self.text_cache_len - 1
 
                 last_token = self.context_buffer[-1]
                 inp = torch.tensor([[last_token]], dtype=torch.long, device=self.device)
-                logits, halt_logits, hidden, returned_cache = self.model(
+                logits, halt_logits, hidden, self.kv_cache = self.model(
                     inp, memory_vectors=None, return_hidden=True,
-                    kv_cache=combined, cache_position=cache_pos,
+                    kv_cache=rebuilt, cache_position=cache_pos,
                 )
-
-                self.mem_kv_cache = new_mem_kv
-                _, self.text_kv_cache = self._split_kv(returned_cache, n_mem)
                 self.n_mem_positions = n_mem
+                # text_cache_len unchanged
 
             else:
                 # PREFILL: first token or cache invalidated — full forward
                 mem_tensor = self._build_mem_tensor(mem_vecs)
                 n_mem = mem_tensor.shape[1] + 2
                 inp = self._build_input()
-                logits, halt_logits, hidden, returned_cache = self.model(
+                logits, halt_logits, hidden, self.kv_cache = self.model(
                     inp, memory_vectors=mem_tensor, return_hidden=True,
                     kv_cache=[], cache_position=0,
                 )
-
-                self.mem_kv_cache, self.text_kv_cache = self._split_kv(returned_cache, n_mem)
                 self.n_mem_positions = n_mem
                 self.text_cache_len = len(self.context_buffer)
 
@@ -200,7 +176,7 @@ class Agent:
             # Update internal hidden state from last text position
             self.h = hidden[0, -1, :].detach()
 
-            halt_prob = F.softmax(halt_logits[0, -1, :], dim=-1)[HALT].item()
+            halt_prob = F.softmax(halt_logits[0, -1, :].float().cpu(), dim=-1)[HALT].item()
             if halt_prob > 0.5 or act_step == self.max_act_steps - 1:
                 break
 
@@ -214,7 +190,8 @@ class Agent:
         if final_logits is None:
             return None
 
-        last_logits = final_logits[0, -1, :]            # (vocab_size,)
+        # Move to CPU for sampling (avoids MPS sync overhead per .item())
+        last_logits = final_logits[0, -1, :].float().cpu()
 
         # Apply repetition penalty to recently emitted tokens
         if repetition_penalty != 1.0 and recent_tokens:
@@ -233,7 +210,6 @@ class Agent:
         top1_prob = probs.max().item()
 
         if top1_prob > self.emit_threshold or force_emit:
-            # Top-k sampling
             if top_k > 0:
                 topk_probs, topk_ids = probs.topk(min(top_k, probs.size(-1)))
                 topk_probs = topk_probs / topk_probs.sum()
