@@ -23,6 +23,7 @@ from hardware import (
 )
 from model import LoopedLatentController
 from memory import MemorySystem
+from agent import addr_bytes, memory_vecs_to_tensor
 from dataset import prepare_data
 from utils import (
     get_lr, save_checkpoint, load_checkpoint, evaluate, generate_sample,
@@ -41,24 +42,6 @@ def hidden_to_int8(hidden: torch.Tensor) -> np.ndarray:
     if scale < 1e-6:
         return np.zeros(arr.shape, dtype=np.int8)
     return np.clip(np.round(arr / scale * 127.0), -128, 127).astype(np.int8)
-
-
-def memory_vecs_to_tensor(
-    vecs: list,
-    d_model: int,
-    device,
-) -> torch.Tensor:
-    """
-    Convert list of int8 numpy arrays (each (512,)) to float tensor (1, n, d_model).
-    """
-    n = len(vecs)
-    out = np.stack(vecs, axis=0).astype(np.float32) / 127.0  # (n, 512)
-    return torch.from_numpy(out).unsqueeze(0).to(device)     # (1, n, d_model)
-
-
-def addr_bytes(addr_tensor: torch.Tensor) -> bytes:
-    """Convert int8 torch tensor → bytes for TrieIndex."""
-    return addr_tensor.cpu().numpy().tobytes()
 
 
 def batch_read_memory(model, hidden_states, memory, cfg, device):

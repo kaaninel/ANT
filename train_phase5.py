@@ -36,7 +36,8 @@ from utils import (
     get_lr, save_checkpoint, load_checkpoint,
     Timer, vram_report, peak_vram, format_eta, format_time,
 )
-from train_phase3 import memory_vecs_to_tensor, addr_bytes, hidden_to_int8, batch_read_memory
+from agent import addr_bytes, memory_vecs_to_tensor
+from train_phase3 import hidden_to_int8, batch_read_memory
 from train_phase4 import get_curriculum
 
 

@@ -12,7 +12,23 @@ import torch.nn.functional as F
 
 from model import LoopedLatentController
 from memory import MemorySystem
-from train_phase3 import memory_vecs_to_tensor, addr_bytes
+
+
+# ── Shared utilities (also used by train_phase3) ──
+
+def addr_bytes(addr_tensor: torch.Tensor) -> bytes:
+    """Convert int8 address tensor → bytes for TrieIndex."""
+    return addr_tensor.cpu().numpy().tobytes()
+
+
+def memory_vecs_to_tensor(
+    vecs: list,
+    d_model: int,
+    device,
+) -> torch.Tensor:
+    """Convert list of int8 numpy arrays to float tensor (1, n, d_model)."""
+    out = np.stack(vecs, axis=0).astype(np.float32) / 127.0
+    return torch.from_numpy(out).unsqueeze(0).to(device)
 
 
 class Agent:
