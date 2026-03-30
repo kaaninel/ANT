@@ -267,16 +267,25 @@ def train(
         model.halt_head.bias.data[0] = -1.0
         model.halt_head.bias.data[1] = 1.0
 
-    # Load Phase 2 address heads — UNFROZEN (key difference from Phase 3/4)
+    # Load Phase 2 address heads
     addr_heads_path = os.path.join(phase2_dir, "addr_heads.pt")
     if os.path.exists(addr_heads_path):
         ckpt = torch.load(addr_heads_path, map_location=device, weights_only=False)
         for i, sd in enumerate(ckpt["addr_heads"]):
             model.addr_heads[i].load_state_dict(sd)
+
+    # Freeze address heads when memory is frozen — addresses must stay consistent
+    # with the pre-seeded memory store. Unfreeze in Phase 5b when memory writes resume.
+    if freeze_memory:
+        for head in model.addr_heads:
+            for p in head.parameters():
+                p.requires_grad_(False)
+        print("Loaded Phase 2 address heads (FROZEN — consistent with pre-seeded memory)")
+    else:
+        for head in model.addr_heads:
+            for p in head.parameters():
+                p.requires_grad_(True)
         print("Loaded Phase 2 address heads (UNFROZEN for Phase 5)")
-    for head in model.addr_heads:
-        for p in head.parameters():
-            p.requires_grad_(True)  # UNFROZEN — will train at 0.3× LR
 
     # ------------------------------------------------ auto-calibrate batch size
     max_curriculum_steps = max(s[1] for s in pcfg.ponder_curriculum)
