@@ -317,7 +317,7 @@ def train(
     if use_compile:
         print("Compiling model with torch.compile...")
         try:
-            model = torch.compile(model, mode='reduce-overhead')
+            model = torch.compile(model, mode='default')
         except Exception as e:
             print(f"  torch.compile failed ({e}), continuing without compilation.")
             use_compile = False
