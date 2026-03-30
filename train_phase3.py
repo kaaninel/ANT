@@ -199,6 +199,12 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
         for p in head.parameters():
             p.requires_grad_(False)
 
+    # ------------------------------------------------ torch.compile
+    use_compile = ov.get('use_compile', False) and hasattr(torch, 'compile')
+    if use_compile and device == 'cuda':
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model, mode='default')
+
     # ------------------------------------------------ auto-calibrate batch size
     target_effective = micro_batch * grad_accum
     if device == 'cuda':
@@ -245,15 +251,18 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
     tokens_per_step = micro_batch * grad_accum * cfg.max_seq_len
     total_steps = pcfg.total_tokens // tokens_per_step
 
-    if resume:
-        latest_path = os.path.join(phase3_dir, "latest.pt")
-        if os.path.exists(latest_path):
-            ckpt = load_checkpoint(model, optimizer, latest_path, device)
-            step = ckpt.get("step", 0)
-            tokens_seen = ckpt.get("tokens_seen", step * tokens_per_step)
-            best_loss = ckpt.get("best_loss", float("inf"))
-            if use_scaler and "scaler" in ckpt and ckpt["scaler"] is not None:
-                scaler.load_state_dict(ckpt["scaler"])
+    # Auto-resume: if latest.pt exists, continue from it
+    latest_path = os.path.join(phase3_dir, "latest.pt")
+    if os.path.exists(latest_path):
+        ckpt = load_checkpoint(model, optimizer, latest_path, device)
+        step = ckpt.get("step", 0)
+        tokens_seen = ckpt.get("tokens_seen", step * tokens_per_step)
+        best_loss = ckpt.get("best_loss", float("inf"))
+        if use_scaler and "scaler" in ckpt and ckpt["scaler"] is not None:
+            scaler.load_state_dict(ckpt["scaler"])
+        print(f"  Resumed from step {step} ({tokens_seen/1e6:.0f}M tokens)")
+    elif resume:
+        print("  --resume specified but no checkpoint found, starting fresh")
     total_tokens_fmt = f"{pcfg.total_tokens / 1e9:.2f}B"
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

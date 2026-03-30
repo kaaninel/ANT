@@ -62,9 +62,9 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     if use_compile:
-        print("Compiling model with torch.compile (this takes ~30-60s on first batch)...")
+        print("Compiling model with torch.compile...")
         try:
-            model = torch.compile(model, mode='reduce-overhead')
+            model = torch.compile(model, mode='default')
         except Exception as e:
             print(f"torch.compile failed ({e}), continuing without compilation.")
 
@@ -107,15 +107,18 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
     tokens_per_step = micro_batch * grad_accum * cfg.max_seq_len
     total_steps = pcfg.total_tokens // tokens_per_step
 
-    if resume:
-        latest_path = os.path.join(save_dir, "latest.pt")
-        if os.path.exists(latest_path):
-            ckpt = load_checkpoint(model, optimizer, latest_path, device)
-            step = ckpt.get("step", 0)
-            tokens_seen = ckpt.get("tokens_seen", step * tokens_per_step)
-            best_loss = ckpt.get("best_loss", float("inf"))
-            if use_scaler and "scaler" in ckpt and ckpt["scaler"] is not None:
-                scaler.load_state_dict(ckpt["scaler"])
+    # Auto-resume: if latest.pt exists, continue from it
+    latest_path = os.path.join(save_dir, "latest.pt")
+    if os.path.exists(latest_path):
+        ckpt = load_checkpoint(model, optimizer, latest_path, device)
+        step = ckpt.get("step", 0)
+        tokens_seen = ckpt.get("tokens_seen", step * tokens_per_step)
+        best_loss = ckpt.get("best_loss", float("inf"))
+        if use_scaler and "scaler" in ckpt and ckpt["scaler"] is not None:
+            scaler.load_state_dict(ckpt["scaler"])
+        print(f"  Resumed from step {step} ({tokens_seen/1e6:.0f}M tokens)")
+    elif resume:
+        print("  --resume specified but no checkpoint found, starting fresh")
     total_tokens_fmt = f"{pcfg.total_tokens / 1e9:.2f}B"
 
     amp_label = f"{'BF16' if amp_dtype == torch.bfloat16 else 'FP16'} (autocast + GradScaler)" if use_amp else "FP32"

@@ -217,12 +217,14 @@ def train(checkpoint_dir: str, data_dir: str, resume: bool = False):
     timer = Timer()
     start_step = 0
 
-    # Resume from a partially-completed Phase 2 run if available
+    # Auto-resume: if latest.pt exists, continue from it
     latest_p2 = os.path.join(phase2_dir, "latest.pt")
-    if resume and os.path.exists(latest_p2):
+    if os.path.exists(latest_p2):
         ckpt = load_checkpoint(model, optimizer, latest_p2, device)
         start_step = ckpt.get("step", 0)
-        print(f"Resuming Phase 2 from step {start_step}")
+        print(f"  Resumed Phase 2 from step {start_step}")
+    elif resume:
+        print("  --resume specified but no checkpoint found, starting fresh")
 
     for step in range(start_step + 1, pcfg.steps + 1):
         # Random mini-batch
