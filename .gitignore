@@ -10,6 +10,8 @@ build/
 .venv
 checkpoints/
 data/
+data_cache/
+memory_store/
 *.pt
 *.bin
 conv/
