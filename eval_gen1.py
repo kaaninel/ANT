@@ -30,7 +30,7 @@ from model import LoopedLatentController
 from config import ModelConfig, MemoryConfig
 from memory import MemorySystem
 from orchestrator import Orchestrator
-from tokenizer_utils import load_tokenizer, encode, decode
+from tokenizer_utils import load_tokenizer, encode
 
 log = logging.getLogger("eval_gen1")
 
@@ -211,7 +211,7 @@ def evaluate_babi_batched(
             # Logits at last real token position → predicts next token
             last_logits = weighted_logits[j, seq_len - 1, :]  # (vocab_size,)
             pred_id = last_logits.argmax().item()
-            pred_text = decode(tokenizer, [pred_id])
+            pred_text = tokenizer.decode([pred_id])
 
             # Also try greedy decode of a few more tokens
             generated_ids = [pred_id]
@@ -230,7 +230,7 @@ def evaluate_babi_batched(
                 generated_ids.append(next_id)
                 cur_inp = next_inp
 
-            generated_text = decode(tokenizer, generated_ids)
+            generated_text = tokenizer.decode(generated_ids)
             correct = check_answer(generated_text, ex["answer"])
 
             task = ex["task"]
