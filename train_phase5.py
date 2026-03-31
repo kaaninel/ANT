@@ -268,10 +268,8 @@ def train(
     else:
         print("WARNING: No prior checkpoint found — training from scratch")
 
-    # Ensure halt head has sensible initialization
-    if hasattr(model, 'halt_head'):
-        model.halt_head.bias.data[0] = -1.0
-        model.halt_head.bias.data[1] = 1.0
+    # NOTE: halt head bias now initializes to [0, 0] in model.py.
+    # Don't override it here — loaded checkpoints already have their trained values.
 
     # Load Phase 2 address heads
     addr_heads_path = os.path.join(phase2_dir, "addr_heads.pt")

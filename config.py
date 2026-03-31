@@ -151,3 +151,29 @@ class MemoryConfig:
     coarse_dims: int = 4
     fine_dims: int = 4
     n_mem_slots: int = 9           # must match ModelConfig.n_mem_slots
+
+
+@dataclass
+class MicroModelConfig:
+    """~1M param model for rapid memory-architecture prototyping."""
+    vocab_size: int = 256
+    d_model: int = 128
+    n_heads: int = 2
+    head_dim: int = 64
+    ffn_dim: int = 512
+    n_layers: int = 4
+    max_seq_len: int = 128
+    dropout: float = 0.0
+    rope_theta: float = 10000.0
+    n_mem_slots: int = 9
+    n_mem_positions: int = 11
+    n_text_positions: int = 117       # 128 - 11
+    n_addr_heads: int = 3
+    addr_dim: int = 8
+    pad_id: int = 0
+    eos_id: int = 1
+    bos_id: int = 2
+    unk_id: int = 3
+    mem_start_id: int = 4
+    mem_end_id: int = 5
+    noop_id: int = 6

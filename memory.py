@@ -105,13 +105,12 @@ class TrieIndex:
 # MemorySystem
 # ---------------------------------------------------------------------------
 
-RECORD_SIZE = 512   # bytes (int8)
-
 
 class MemorySystem:
-    def __init__(self, data_path: str, cfg: MemoryConfig):
+    def __init__(self, data_path: str, cfg: MemoryConfig, record_size: int = 512):
         self.data_path = data_path
         self.cfg = cfg
+        self.record_size = record_size
         os.makedirs(data_path, exist_ok=True)
 
         self._data_file = os.path.join(data_path, "data.bin")
@@ -134,9 +133,9 @@ class MemorySystem:
         """Load all records and metadata into RAM."""
         if self._n_records > 0 and os.path.exists(self._data_file):
             raw = np.fromfile(self._data_file, dtype=np.int8)
-            self._data_cache = raw.reshape(-1, RECORD_SIZE)
+            self._data_cache = raw.reshape(-1, self.record_size)
         else:
-            self._data_cache = np.empty((0, RECORD_SIZE), dtype=np.int8)
+            self._data_cache = np.empty((0, self.record_size), dtype=np.int8)
 
         if self._n_records > 0 and os.path.exists(self._meta_file):
             raw_meta = np.fromfile(self._meta_file, dtype=np.uint16)
@@ -147,7 +146,7 @@ class MemorySystem:
         self._cache_capacity = max(self._n_records, 1024)
         # Pre-allocate with headroom to avoid frequent resizes
         if self._data_cache.shape[0] < self._cache_capacity:
-            new_data = np.zeros((self._cache_capacity, RECORD_SIZE), dtype=np.int8)
+            new_data = np.zeros((self._cache_capacity, self.record_size), dtype=np.int8)
             new_data[:self._data_cache.shape[0]] = self._data_cache
             self._data_cache = new_data
         if self._meta_cache.shape[0] < self._cache_capacity:
@@ -160,7 +159,7 @@ class MemorySystem:
         if needed <= self._cache_capacity:
             return
         new_cap = max(needed, self._cache_capacity * 2)
-        new_data = np.zeros((new_cap, RECORD_SIZE), dtype=np.int8)
+        new_data = np.zeros((new_cap, self.record_size), dtype=np.int8)
         new_data[:self._n_records] = self._data_cache[:self._n_records]
         self._data_cache = new_data
         new_meta = np.zeros(new_cap, dtype=np.uint16)
@@ -183,11 +182,20 @@ class MemorySystem:
         if not os.path.exists(self._data_file):
             return 0
         size = os.path.getsize(self._data_file)
-        return size // RECORD_SIZE
+        return size // self.record_size
 
     def total_entries(self) -> int:
         """Return current number of records in RAM cache."""
         return self._n_records
+
+    def reset(self):
+        """Clear all records and indexes in-memory (no disk I/O)."""
+        with self._lock:
+            self._n_records = 0
+            self.indexes = [TrieIndex() for _ in range(len(self.indexes))]
+            self._data_cache = np.zeros((self._cache_capacity, self.record_size),
+                                        dtype=np.int8)
+            self._meta_cache = np.zeros(self._cache_capacity, dtype=np.uint16)
 
     def _read_record(self, record_number: int) -> np.ndarray:
         return self._data_cache[record_number].copy()
@@ -247,7 +255,7 @@ class MemorySystem:
 
         # Pad to n_mem_slots
         while len(vecs) < self.cfg.n_mem_slots:
-            vecs.append(np.zeros(RECORD_SIZE, dtype=np.int8))
+            vecs.append(np.zeros(self.record_size, dtype=np.int8))
 
         return vecs[:self.cfg.n_mem_slots]
 
@@ -258,7 +266,7 @@ class MemorySystem:
     def write_memory(self, addresses: List[bytes], vector: np.ndarray):
         """
         addresses : list of 3 byte-strings (one per address head)
-        vector    : float32 numpy array of shape (512,) — will be scaled to int8
+        vector    : float32 numpy array of shape (d_model,) — will be scaled to int8
         """
         # Scale vector to int8
         scale = np.abs(vector).max()
@@ -308,11 +316,11 @@ class MemorySystem:
         Vectorized batch memory read.
 
         batch_addresses: List of B items, each a list of 3 byte-strings.
-        Returns: np.ndarray of shape (B, n_mem_slots, RECORD_SIZE), dtype int8.
+        Returns: np.ndarray of shape (B, n_mem_slots, self.record_size), dtype int8.
         """
         B = len(batch_addresses)
         n_slots = self.cfg.n_mem_slots
-        result = np.zeros((B, n_slots, RECORD_SIZE), dtype=np.int8)
+        result = np.zeros((B, n_slots, self.record_size), dtype=np.int8)
 
         for b in range(B):
             seen = set()

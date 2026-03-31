@@ -163,11 +163,9 @@ class LoopedLatentController(nn.Module):
         self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.d_model)
 
-        # Halt head: bias initialized to [-1, +1] (favor CONTINUE=0)
+        # Halt head: bias initialized to [0, 0] (50/50 CONTINUE/HALT)
         self.halt_head = nn.Linear(cfg.d_model, 2, bias=True)
         nn.init.constant_(self.halt_head.bias, 0.0)
-        self.halt_head.bias.data[0] = -1.0
-        self.halt_head.bias.data[1] = 1.0
 
         # Address heads
         self.addr_heads = nn.ModuleList([
