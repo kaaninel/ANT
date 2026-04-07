@@ -3129,10 +3129,11 @@ def generate_chat_data(n: int = 5000, seed: int = 42) -> list[str]:
 
 def train_chat(model, cfg, device, output_dir,
                steps_phase1=5000, steps_phase2=5000, steps_phase3=5000,
-               lr=3e-4, batch_size=32, eval_interval=250,
+               lr=3e-4, batch_size=32, grad_accum=1, eval_interval=250,
                window_size=8, num_passes=4,
                n_wiki=50000, n_shell=5000, n_qa=20000, n_chat=5000,
-               use_bf16=False, hf_repo=None, hf_upload_interval=1000):
+               use_bf16=False, use_compile=False,
+               hf_repo=None, hf_upload_interval=1000):
     """
     3-phase chat training using CAUSAL sliding windows for all losses.
 
@@ -3154,8 +3155,9 @@ def train_chat(model, cfg, device, output_dir,
     print("=" * 60)
     print(f"  Window size:     {window_size}")
     print(f"  Num passes:      {num_passes}")
-    print(f"  Batch size:      {batch_size}")
+    print(f"  Batch size:      {batch_size} (micro) × {grad_accum} accum = {batch_size * grad_accum} effective")
     print(f"  BF16:            {use_bf16}")
+    print(f"  Compile:         {use_compile}")
     print(f"  Phase 1 (LM):    {steps_phase1} steps")
     print(f"  Phase 2 (LM+QA): {steps_phase2} steps")
     print(f"  Phase 3 (all):   {steps_phase3} steps")
@@ -3209,6 +3211,19 @@ def train_chat(model, cfg, device, output_dir,
 
     # Optimizer with weight decay
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1)
+
+    # Optional torch.compile
+    if use_compile and device == 'cuda':
+        print("  Compiling model with torch.compile...")
+        model = torch.compile(model, mode='max-autotune')
+        # Warmup compilation
+        with torch.no_grad():
+            dummy = torch.randint(0, 256, (4, 32), device=device)
+            _ = sliding_lm_encode(model, dummy, window_size, num_passes, causal=True)
+        if hasattr(torch.cuda, 'synchronize'):
+            torch.cuda.synchronize()
+        print("  ✓ Compiled and warmed up")
+
     model.train()
 
     t_start = time.time()
@@ -3257,109 +3272,123 @@ def train_chat(model, cfg, device, output_dir,
         for pg in optimizer.param_groups:
             pg["lr"] = lr_now
 
-        total_loss = torch.tensor(0.0, device=device)
+        optimizer.zero_grad(set_to_none=True)
+        accum_loss = 0.0
         loss_parts = {}
 
-        amp_ctx = autocast(amp_device, dtype=amp_dtype) if use_bf16 else nullcontext()
+        for accum_i in range(grad_accum):
+            total_loss = torch.tensor(0.0, device=device)
 
-        # ── LM loss via causal sliding window (all phases) ──
-        try:
-            lm_inp, lm_tgt = next(lm_iter)
-        except StopIteration:
-            lm_iter = iter(lm_loader)
-            lm_inp, lm_tgt = next(lm_iter)
-        lm_inp, lm_tgt = lm_inp.to(device), lm_tgt.to(device)
+            amp_ctx = autocast(amp_device, dtype=amp_dtype) if use_bf16 else nullcontext()
 
-        with amp_ctx:
-            lm_hidden = sliding_lm_encode(
-                model, lm_inp, window_size, num_passes, causal=True)
-            lm_logits = F.linear(lm_hidden, model.embed.weight)
-            lm_loss = F.cross_entropy(
-                lm_logits.reshape(-1, VOCAB_SIZE),
-                lm_tgt.reshape(-1), ignore_index=pad)
-        loss_parts['lm'] = lm_loss.item()
-
-        if phase == 1:
-            total_loss = lm_loss
-        elif phase == 2:
-            total_loss = total_loss + 0.5 * lm_loss
-        else:
-            total_loss = total_loss + 0.34 * lm_loss
-
-        # ── QA loss via causal sliding + memory (phase 2+) ──
-        if phase >= 2:
-            batch_idx = random.sample(range(len(qa_data)), batch_size)
-            batch = [qa_data[i] for i in batch_idx]
-            max_slen = max(len(b[0]) for b in batch)
-            inp_b, tgt_b, p_b = [], [], []
-            for inp_ids, tgt_ids, p_ids in batch:
-                inp_b.append(inp_ids + [pad] * (max_slen - len(inp_ids)))
-                tgt_b.append(tgt_ids + [pad] * (max_slen - len(tgt_ids)))
-                p_b.append(p_ids)
-
-            q_t = torch.tensor(inp_b, dtype=torch.long, device=device)
-            tgt_t = torch.tensor(tgt_b, dtype=torch.long, device=device)
-            p_t = torch.tensor(p_b, dtype=torch.long, device=device)
-
-            # Memory encoding (frozen D1 for first 30% of phase 2)
-            phase2_step = step - steps_phase1
-            d1_threshold = int(steps_phase2 * 0.3)
-            with amp_ctx:
-                if phase == 2 and phase2_step < d1_threshold:
-                    model.eval()
-                    mk, mv, mm = encode_frozen(model, p_t, device)
-                    model.train()
-                else:
-                    mk, mv, mm = encode_diff(model, p_t, device)
-
-                qa_hidden = sliding_lm_encode(
-                    model, q_t, window_size, num_passes,
-                    mem_keys=mk, mem_vals=mv, mem_mask=mm, causal=True)
-                qa_logits = F.linear(qa_hidden, model.embed.weight)
-                qa_loss = F.cross_entropy(
-                    qa_logits.reshape(-1, VOCAB_SIZE),
-                    tgt_t.reshape(-1), ignore_index=pad)
-            loss_parts['qa'] = qa_loss.item()
-
-            if phase == 2:
-                total_loss = total_loss + 0.5 * qa_loss
-            else:
-                total_loss = total_loss + 0.33 * qa_loss
-
-        # ── Chat loss via causal sliding (phase 3) ──
-        if phase == 3:
+            # ── LM loss via causal sliding window (all phases) ──
             try:
-                ch_inp, ch_tgt = next(chat_iter)
+                lm_inp, lm_tgt = next(lm_iter)
             except StopIteration:
-                chat_iter = iter(chat_loader)
-                ch_inp, ch_tgt = next(chat_iter)
-            ch_inp, ch_tgt = ch_inp.to(device), ch_tgt.to(device)
+                lm_iter = iter(lm_loader)
+                lm_inp, lm_tgt = next(lm_iter)
+            lm_inp, lm_tgt = lm_inp.to(device), lm_tgt.to(device)
 
             with amp_ctx:
-                ch_hidden = sliding_lm_encode(
-                    model, ch_inp, window_size, num_passes, causal=True)
-                ch_logits = F.linear(ch_hidden, model.embed.weight)
-                ch_loss = F.cross_entropy(
-                    ch_logits.reshape(-1, VOCAB_SIZE),
-                    ch_tgt.reshape(-1), ignore_index=pad)
-            loss_parts['chat'] = ch_loss.item()
-            total_loss = total_loss + 0.33 * ch_loss
+                lm_hidden = sliding_lm_encode(
+                    model, lm_inp, window_size, num_passes, causal=True)
+                lm_logits = F.linear(lm_hidden, model.embed.weight)
+                lm_loss = F.cross_entropy(
+                    lm_logits.reshape(-1, VOCAB_SIZE),
+                    lm_tgt.reshape(-1), ignore_index=pad)
 
-        # ── Backward + step ──
-        optimizer.zero_grad(set_to_none=True)
+            if accum_i == 0:
+                loss_parts['lm'] = lm_loss.item()
+
+            if phase == 1:
+                total_loss = lm_loss
+            elif phase == 2:
+                total_loss = total_loss + 0.5 * lm_loss
+            else:
+                total_loss = total_loss + 0.34 * lm_loss
+
+            # ── QA loss via causal sliding + memory (phase 2+) ──
+            if phase >= 2:
+                batch_idx = random.sample(range(len(qa_data)), batch_size)
+                batch = [qa_data[i] for i in batch_idx]
+                max_slen = max(len(b[0]) for b in batch)
+                inp_b, tgt_b, p_b = [], [], []
+                for inp_ids, tgt_ids, p_ids in batch:
+                    inp_b.append(inp_ids + [pad] * (max_slen - len(inp_ids)))
+                    tgt_b.append(tgt_ids + [pad] * (max_slen - len(tgt_ids)))
+                    p_b.append(p_ids)
+
+                q_t = torch.tensor(inp_b, dtype=torch.long, device=device)
+                tgt_t = torch.tensor(tgt_b, dtype=torch.long, device=device)
+                p_t = torch.tensor(p_b, dtype=torch.long, device=device)
+
+                phase2_step = step - steps_phase1
+                d1_threshold = int(steps_phase2 * 0.3)
+                with amp_ctx:
+                    if phase == 2 and phase2_step < d1_threshold:
+                        model.eval()
+                        mk, mv, mm = encode_frozen(model, p_t, device)
+                        model.train()
+                    else:
+                        mk, mv, mm = encode_diff(model, p_t, device)
+
+                    qa_hidden = sliding_lm_encode(
+                        model, q_t, window_size, num_passes,
+                        mem_keys=mk, mem_vals=mv, mem_mask=mm, causal=True)
+                    qa_logits = F.linear(qa_hidden, model.embed.weight)
+                    qa_loss = F.cross_entropy(
+                        qa_logits.reshape(-1, VOCAB_SIZE),
+                        tgt_t.reshape(-1), ignore_index=pad)
+
+                if accum_i == 0:
+                    loss_parts['qa'] = qa_loss.item()
+
+                if phase == 2:
+                    total_loss = total_loss + 0.5 * qa_loss
+                else:
+                    total_loss = total_loss + 0.33 * qa_loss
+
+            # ── Chat loss via causal sliding (phase 3) ──
+            if phase == 3:
+                try:
+                    ch_inp, ch_tgt = next(chat_iter)
+                except StopIteration:
+                    chat_iter = iter(chat_loader)
+                    ch_inp, ch_tgt = next(chat_iter)
+                ch_inp, ch_tgt = ch_inp.to(device), ch_tgt.to(device)
+
+                with amp_ctx:
+                    ch_hidden = sliding_lm_encode(
+                        model, ch_inp, window_size, num_passes, causal=True)
+                    ch_logits = F.linear(ch_hidden, model.embed.weight)
+                    ch_loss = F.cross_entropy(
+                        ch_logits.reshape(-1, VOCAB_SIZE),
+                        ch_tgt.reshape(-1), ignore_index=pad)
+
+                if accum_i == 0:
+                    loss_parts['chat'] = ch_loss.item()
+                total_loss = total_loss + 0.33 * ch_loss
+
+            # Scale loss by grad_accum and accumulate backward
+            scaled_loss = total_loss / grad_accum
+            if scaler is not None:
+                scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
+            accum_loss += total_loss.item() / grad_accum
+
+        # ── Optimizer step (after all accumulation) ──
         if scaler is not None:
-            scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
             grad_norm, _ = log_gradient_stats(model)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            total_loss.backward()
             grad_norm, _ = log_gradient_stats(model)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-        tracker.add_loss(total_loss.item())
+        tracker.add_loss(accum_loss)
         tracker.add_grad_norm(grad_norm)
         if step % 25 == 0 or step == 1:
             elapsed = time.time() - t_start
@@ -3370,7 +3399,7 @@ def train_chat(model, cfg, device, output_dir,
                 vram_gb = torch.cuda.max_memory_allocated() / 1e9
                 vram_str = f" VRAM={vram_gb:.1f}GB"
             print(f"  [P{phase} {step:>5}/{total_steps}] "
-                  f"loss={total_loss.item():.4f} {parts_str} "
+                  f"loss={accum_loss:.4f} {parts_str} "
                   f"gnorm={grad_norm:.2f} lr={lr_now:.1e} "
                   f"spd={tracker.steps_per_sec:.1f}it/s{vram_str} "
                   f"[{elapsed:.0f}s / ETA {eta:.0f}s]")
@@ -3516,8 +3545,12 @@ def main():
                         help="Weight for QA loss in multi-task training")
     parser.add_argument("--bf16", action="store_true",
                         help="Use BF16 mixed precision (A100/H100)")
+    parser.add_argument("--compile", action="store_true",
+                        help="Use torch.compile (CUDA only)")
     parser.add_argument("--batch_size", type=int, default=32,
-                        help="Training batch size (increase for A100)")
+                        help="Micro-batch size per accumulation step")
+    parser.add_argument("--grad_accum", type=int, default=1,
+                        help="Gradient accumulation steps (effective_batch = batch_size × grad_accum)")
     parser.add_argument("--eval_interval", type=int, default=250,
                         help="Evaluate every N steps")
     parser.add_argument("--hf_repo", type=str, default=None,
@@ -3622,11 +3655,13 @@ def main():
             steps_phase2=args.chat_steps2,
             steps_phase3=args.chat_steps3,
             lr=3e-4, batch_size=args.batch_size,
+            grad_accum=args.grad_accum,
             eval_interval=args.eval_interval,
             window_size=window_size, num_passes=num_passes,
             n_wiki=args.n_wiki, n_shell=args.n_shell,
             n_qa=args.n_train, n_chat=5000,
-            use_bf16=args.bf16, hf_repo=args.hf_repo,
+            use_bf16=args.bf16, use_compile=args.compile,
+            hf_repo=args.hf_repo,
         )
 
         total_time = time.time() - t_start
