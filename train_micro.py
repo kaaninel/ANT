@@ -320,6 +320,319 @@ def generate_dataset(n: int, seed: int = 42) -> list[QAExample]:
 
 
 # ============================================================================
+# Shell/CLI Data Generator — synthetic command examples
+# ============================================================================
+
+_SHELL_COMMANDS = [
+    "ls", "cd", "pwd", "cat", "echo", "grep", "find", "sed", "awk", "sort",
+    "uniq", "wc", "head", "tail", "cut", "tr", "xargs", "tee", "mkdir",
+    "rmdir", "rm", "cp", "mv", "touch", "chmod", "chown", "ln", "diff",
+    "tar", "gzip", "gunzip", "zip", "unzip", "curl", "wget", "ssh", "scp",
+    "rsync", "ps", "top", "kill", "df", "du", "mount", "umount", "ping",
+    "ifconfig", "ip", "netstat", "dig", "nslookup", "git", "docker",
+    "python", "node", "npm", "pip", "make", "gcc", "go", "cargo", "man",
+]
+_SHELL_FLAGS = {
+    "ls": ["-l", "-a", "-la", "-lh", "-R", "-t", "-S", "--color"],
+    "grep": ["-r", "-i", "-n", "-v", "-c", "-l", "--include", "-E", "-P"],
+    "find": ["-name", "-type f", "-type d", "-mtime", "-size", "-exec"],
+    "ps": ["-ef", "-aux", "-u", "--sort"],
+    "chmod": ["755", "644", "+x", "-R", "u+w", "go-r"],
+    "tar": ["-xzf", "-czf", "-xjf", "-tf", "--list"],
+    "git": ["status", "log", "diff", "add", "commit", "push", "pull",
+            "branch", "checkout", "merge", "rebase", "stash", "clone"],
+    "docker": ["ps", "images", "run", "build", "exec", "stop", "rm",
+               "compose up", "compose down", "logs"],
+    "curl": ["-s", "-o", "-X POST", "-H", "-d", "-L", "-I", "-k"],
+}
+_SHELL_PATHS = [
+    "/home/user", "/tmp", "/var/log", "/etc", "/usr/bin", "/opt",
+    "~/Documents", "~/projects", "./src", "../lib", "/dev/null",
+    ".", "..", "~", "/proc", "/sys",
+]
+_SHELL_FILES = [
+    "README.md", "Makefile", "config.yaml", "main.py", "index.js",
+    "app.go", "Cargo.toml", "package.json", "Dockerfile", ".gitignore",
+    "requirements.txt", "setup.py", "test.sh", "data.csv", "output.log",
+    "server.conf", ".env", "docker-compose.yml", "CMakeLists.txt",
+]
+_SHELL_PATTERNS = [
+    "*.py", "*.js", "*.go", "*.rs", "*.c", "*.h", "*.txt", "*.log",
+    "*.json", "*.yaml", "*.toml", "*.md", "*.sh", "*.sql",
+]
+_SHELL_VARS = [
+    "$HOME", "$PATH", "$USER", "$PWD", "$SHELL", "$EDITOR", "$TERM",
+    "$?", "$$", "$!", "$#", "$0", "$1", "$@",
+]
+_PIPE_COMMANDS = ["grep", "sort", "uniq", "wc", "head", "tail", "cut",
+                  "tr", "awk", "sed", "tee", "xargs"]
+
+
+def _gen_simple_command() -> str:
+    cmd = random.choice(_SHELL_COMMANDS)
+    flags = _SHELL_FLAGS.get(cmd, [])
+    parts = [cmd]
+    if flags and random.random() < 0.7:
+        parts.append(random.choice(flags))
+    if random.random() < 0.5:
+        parts.append(random.choice(_SHELL_FILES + _SHELL_PATHS))
+    return " ".join(parts)
+
+
+def _gen_pipe_chain() -> str:
+    n_pipes = random.randint(2, 4)
+    parts = [_gen_simple_command()]
+    for _ in range(n_pipes - 1):
+        cmd = random.choice(_PIPE_COMMANDS)
+        flags = _SHELL_FLAGS.get(cmd, [])
+        seg = cmd
+        if flags and random.random() < 0.5:
+            seg += " " + random.choice(flags)
+        if cmd in ("grep", "sed", "awk") and random.random() < 0.6:
+            seg += " '" + random.choice(["error", "warning", "TODO",
+                                          "import", "def ", "class ",
+                                          "^#", "\\d+", "[0-9]"]) + "'"
+        parts.append(seg)
+    return " | ".join(parts)
+
+
+def _gen_redirect() -> str:
+    cmd = _gen_simple_command()
+    redir = random.choice([">", ">>", "2>", "2>&1", "&>", "< "])
+    target = random.choice(_SHELL_FILES + ["/dev/null"])
+    return f"{cmd} {redir} {target}"
+
+
+def _gen_conditional() -> str:
+    c1 = _gen_simple_command()
+    c2 = _gen_simple_command()
+    op = random.choice(["&&", "||", ";"])
+    return f"{c1} {op} {c2}"
+
+
+def _gen_subshell() -> str:
+    inner = _gen_simple_command()
+    outer = random.choice(["echo", "export VAR=", "cd"])
+    if outer == "echo":
+        return f'echo "$({inner})"'
+    elif outer.startswith("export"):
+        return f'export VAR="$({inner})"'
+    return f"cd $({inner})"
+
+
+def _gen_for_loop() -> str:
+    var = random.choice(["f", "i", "file", "dir", "x"])
+    iterable = random.choice([
+        f"*.{random.choice(['py', 'js', 'go', 'txt'])}",
+        "$(seq 1 10)",
+        f"$(find . -name '{random.choice(_SHELL_PATTERNS)}')",
+        "$@",
+    ])
+    body = random.choice([
+        f"echo ${var}",
+        f"cat ${var}",
+        f"wc -l ${var}",
+        f"cp ${var} /tmp/",
+    ])
+    return f"for {var} in {iterable}; do {body}; done"
+
+
+def _gen_if_statement() -> str:
+    cond = random.choice([
+        f'[ -f "{random.choice(_SHELL_FILES)}" ]',
+        f'[ -d "{random.choice(_SHELL_PATHS)}" ]',
+        "[ $? -eq 0 ]",
+        f'[ -z "${{VAR}}" ]',
+        f'[ "$1" = "{random.choice(["start", "stop", "restart"])}" ]',
+    ])
+    then_cmd = _gen_simple_command()
+    return f"if {cond}; then {then_cmd}; fi"
+
+
+def _gen_one_liner() -> str:
+    templates = [
+        lambda: f"while read line; do echo $line; done < {random.choice(_SHELL_FILES)}",
+        lambda: f"test -f {random.choice(_SHELL_FILES)} && echo exists || echo missing",
+        lambda: f"[[ {random.choice(_SHELL_VARS)} == *{random.choice(['bin', 'usr', 'home'])}* ]] && echo yes",
+        lambda: f"alias ll='ls -la'",
+        lambda: f"export PATH={random.choice(_SHELL_PATHS)}:$PATH",
+        lambda: f"trap 'rm -f /tmp/lock' EXIT",
+        lambda: f"nohup {_gen_simple_command()} &",
+    ]
+    return random.choice(templates)()
+
+
+_SHELL_GENERATORS = [
+    (_gen_simple_command, 0.25),
+    (_gen_pipe_chain, 0.20),
+    (_gen_redirect, 0.10),
+    (_gen_conditional, 0.10),
+    (_gen_subshell, 0.08),
+    (_gen_for_loop, 0.10),
+    (_gen_if_statement, 0.09),
+    (_gen_one_liner, 0.08),
+]
+
+
+def generate_shell_texts(n: int, seed: int = 42) -> list[str]:
+    """Generate n synthetic shell command examples."""
+    random.seed(seed)
+    gens, weights = zip(*_SHELL_GENERATORS)
+    texts = []
+    for _ in range(n):
+        gen = random.choices(gens, weights=weights, k=1)[0]
+        text = gen()
+        # Occasionally add a comment
+        if random.random() < 0.15:
+            comment = random.choice([
+                "# list files", "# search logs", "# backup", "# deploy",
+                "# cleanup", "# check status", "# build project",
+                "# install deps", "# run tests", "# debug",
+            ])
+            text = comment + "\n" + text
+        texts.append(text)
+    return texts
+
+
+# ============================================================================
+# Wikipedia Sentence Loader — diverse factual text
+# ============================================================================
+
+def load_wikipedia_sentences(n: int = 10000, min_len: int = 30,
+                             max_len: int = 300, seed: int = 42,
+                             cache_dir: str = "data_cache") -> list[str]:
+    """
+    Load sentences from Wikipedia using HuggingFace datasets.
+    Tries wikimedia/wikipedia (English), falls back to synthetic text.
+    Caches processed sentences locally.
+    """
+    cache_path = os.path.join(cache_dir, f"wiki_sentences_{n}.txt")
+    if os.path.exists(cache_path):
+        print(f"  Loading cached Wikipedia sentences from {cache_path}")
+        with open(cache_path, "r") as f:
+            sentences = [line.strip() for line in f if line.strip()]
+        if len(sentences) >= n:
+            return sentences[:n]
+
+    print(f"  Downloading Wikipedia for {n} sentences...")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    loaders = [
+        ("wikimedia/wikipedia", "20231101.en"),
+        ("omarkamali/wikipedia-monthly", "latest.en"),
+    ]
+
+    ds = None
+    for repo, config in loaders:
+        try:
+            from datasets import load_dataset as hf_load
+            ds = hf_load(repo, config, split="train", streaming=True)
+            print(f"  Using {repo} ({config})")
+            break
+        except Exception as e:
+            print(f"  {repo} failed: {e}")
+            continue
+
+    if ds is None:
+        print("  All Wikipedia sources failed, using fallback diverse text")
+        return _generate_fallback_diverse_text(n, seed)
+
+    random.seed(seed)
+    sentences = []
+    for article in ds:
+        text = article.get("text", "")
+        for sent in text.split(". "):
+            sent = sent.strip()
+            if min_len <= len(sent) <= max_len and not sent.startswith("="):
+                if any(c.isalpha() for c in sent):
+                    sentences.append(sent + "." if not sent.endswith(".") else sent)
+                    if len(sentences) >= n * 2:
+                        break
+        if len(sentences) >= n * 2:
+            break
+
+    random.shuffle(sentences)
+    sentences = sentences[:n]
+
+    with open(cache_path, "w") as f:
+        for s in sentences:
+            f.write(s + "\n")
+    print(f"  Cached {len(sentences)} sentences to {cache_path}")
+    return sentences
+
+
+def _generate_fallback_diverse_text(n: int, seed: int = 42) -> list[str]:
+    """Fallback if Wikipedia download fails — synthetic diverse text."""
+    random.seed(seed)
+    subjects = ["the cat", "a scientist", "the river", "an artist", "the machine",
+                "a child", "the city", "a bird", "the forest", "a teacher",
+                "the ocean", "a farmer", "the mountain", "a doctor", "the bridge"]
+    verbs = ["discovered", "created", "moved toward", "studied", "built",
+             "observed", "explored", "designed", "protected", "transformed"]
+    objects = ["a new path", "the ancient ruins", "a hidden garden", "the tall tower",
+               "a small village", "the dark cave", "a bright star", "the old library",
+               "a deep well", "the wooden bridge", "the crystal lake", "a vast desert"]
+    adverbs = ["quickly", "carefully", "silently", "eagerly", "slowly",
+               "boldly", "gently", "suddenly", "deliberately", "gracefully"]
+    texts = []
+    for _ in range(n):
+        subj = random.choice(subjects)
+        verb = random.choice(verbs)
+        obj = random.choice(objects)
+        adv = random.choice(adverbs)
+        pattern = random.choice([
+            f"{subj} {adv} {verb} {obj}.",
+            f"{adv}, {subj} {verb} {obj}.",
+            f"{subj} {verb} {obj} and then paused.",
+            f"after a long journey, {subj} {verb} {obj}.",
+            f"{subj} {verb} {obj}, which surprised everyone.",
+        ])
+        texts.append(pattern)
+    return texts
+
+
+# ============================================================================
+# TextLMDataset — raw text for autoregressive LM training
+# ============================================================================
+
+class TextLMDataset(Dataset):
+    """
+    Autoregressive LM dataset from raw text strings.
+    Each sample: <bos> text_bytes <eos> (padded to max_len).
+    Shifted targets: loss computed on all non-padding positions.
+    """
+    def __init__(self, texts: list[str], max_len: int = 192):
+        self.samples = []
+        pad = PAD_ID
+        bos = BOS_ID
+        eos = EOS_ID
+
+        for text in texts:
+            text_ids = tokenize(text)
+            full_seq = [bos] + text_ids + [eos]
+            if len(full_seq) > max_len + 1:
+                full_seq = full_seq[:max_len + 1]
+
+            inp_ids = full_seq[:-1]
+            tgt_ids = full_seq[1:]
+
+            while len(inp_ids) < max_len:
+                inp_ids.append(pad)
+                tgt_ids.append(pad)
+
+            self.samples.append((
+                torch.tensor(inp_ids, dtype=torch.long),
+                torch.tensor(tgt_ids, dtype=torch.long),
+            ))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+# ============================================================================
 # PyTorch Datasets
 # ============================================================================
 
@@ -2139,6 +2452,214 @@ def detailed_eval(model, cfg, examples, device, n=10, encoder_mode='enc_dec'):
 
 
 # ============================================================================
+# Multi-Task Training: LM (shell + wiki) + QA (bAbI)
+# ============================================================================
+
+def train_multitask(model, cfg, device, train_examples, val_examples,
+                    output_dir, steps=5000, lr=1e-4, batch_size=32,
+                    eval_interval=200, window_size=16, num_passes=4,
+                    lm_weight=0.5, qa_weight=0.5,
+                    n_shell=5000, n_wiki=5000):
+    """
+    Multi-task training combining:
+      1. LM loss on diverse text (shell commands + Wikipedia) via sliding window
+      2. QA loss on bAbI via sliding window + memory cross-attention
+
+    The LM task teaches general language modeling / byte patterns.
+    The QA task teaches memory retrieval and reasoning.
+    Both use the same sliding window architecture.
+    """
+    print("\n" + "=" * 60)
+    print("  Multi-Task Training: LM + Memory QA")
+    print("=" * 60)
+    print(f"  Window size:     {window_size}")
+    print(f"  Num passes:      {num_passes}")
+    print(f"  Steps:           {steps}")
+    print(f"  LM weight:       {lm_weight}")
+    print(f"  QA weight:       {qa_weight}")
+    print(f"  Shell examples:  {n_shell}")
+    print(f"  Wiki sentences:  {n_wiki}")
+
+    pad = VOCAB["<pad>"]
+    bos = VOCAB["<bos>"]
+    eos = VOCAB["<eos>"]
+    ans_marker = VOCAB["<ans>"]
+    d_model = cfg.d_model
+
+    # ── Load diverse text data ──
+    print("\n  Loading diverse text data...")
+    shell_texts = generate_shell_texts(n_shell, seed=42)
+    print(f"    Shell commands: {len(shell_texts)}")
+    wiki_texts = load_wikipedia_sentences(n_wiki, seed=42)
+    print(f"    Wiki sentences: {len(wiki_texts)}")
+
+    all_lm_texts = shell_texts + wiki_texts
+    random.shuffle(all_lm_texts)
+    lm_ds = TextLMDataset(all_lm_texts, max_len=cfg.max_seq_len)
+    lm_loader = DataLoader(lm_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    lm_iter = iter(lm_loader)
+    print(f"    LM dataset: {len(lm_ds)} samples")
+
+    # ── Pre-tokenize QA data ──
+    encode_frozen = encode_sentence_frozen
+    encode_diff = encode_sentence_differentiable
+    max_passage_len = 128
+    qa_data = []
+    for ex in train_examples:
+        passage_ids = tokenize(ex.passage)
+        question_ids = tokenize(ex.question)
+        answer_ids = tokenize(ex.answer)
+        full_seq = [bos, ans_marker] + question_ids + answer_ids + [eos]
+        inp_ids = full_seq[:-1]
+        n_context = 2 + len(question_ids)
+        tgt_ids = [pad] * (n_context - 1) + answer_ids + [eos]
+        assert len(inp_ids) == len(tgt_ids)
+        p_ids = passage_ids[:max_passage_len]
+        while len(p_ids) < max_passage_len:
+            p_ids.append(pad)
+        qa_data.append((inp_ids, tgt_ids, p_ids))
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1)
+    model.train()
+
+    t0 = time.time()
+    best_acc = 0.0
+    best_step = 0
+    tracker = TrainingTracker(window=50)
+    context_fade_start = int(steps * 0.2)
+
+    print(f"\n  {'─' * 56}")
+    print(f"  Training started at {time.strftime('%H:%M:%S')}")
+    print(f"  D1 (frozen enc): steps 1-{context_fade_start}")
+    print(f"  D2 (co-adapt):   steps {context_fade_start+1}-{steps}")
+    print(f"  {'─' * 56}")
+
+    for step in range(1, steps + 1):
+        tracker.tick()
+
+        lr_now = get_lr(step, 200, steps, lr, lr * 0.01)
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr_now
+
+        total_loss = torch.tensor(0.0, device=device)
+
+        # ── LM loss on diverse text ──
+        try:
+            lm_inp, lm_tgt = next(lm_iter)
+        except StopIteration:
+            lm_iter = iter(lm_loader)
+            lm_inp, lm_tgt = next(lm_iter)
+        lm_inp, lm_tgt = lm_inp.to(device), lm_tgt.to(device)
+
+        lm_hidden = sliding_lm_encode(model, lm_inp, window_size, num_passes)
+        lm_logits = F.linear(lm_hidden, model.embed.weight)
+        lm_loss = F.cross_entropy(
+            lm_logits.reshape(-1, VOCAB_SIZE),
+            lm_tgt.reshape(-1),
+            ignore_index=pad)
+        total_loss = total_loss + lm_weight * lm_loss
+
+        # ── QA loss with memory ──
+        batch_idx = random.sample(range(len(qa_data)), batch_size)
+        batch = [qa_data[i] for i in batch_idx]
+
+        max_seq_len = max(len(b[0]) for b in batch)
+        inp_batch, tgt_batch, passage_batch = [], [], []
+        for inp_ids, tgt_ids, p_ids in batch:
+            inp_batch.append(inp_ids + [pad] * (max_seq_len - len(inp_ids)))
+            tgt_batch.append(tgt_ids + [pad] * (max_seq_len - len(tgt_ids)))
+            passage_batch.append(p_ids)
+
+        q_tensor = torch.tensor(inp_batch, dtype=torch.long, device=device)
+        tgt_tensor = torch.tensor(tgt_batch, dtype=torch.long, device=device)
+        p_tensor = torch.tensor(passage_batch, dtype=torch.long, device=device)
+
+        if step >= context_fade_start:
+            mem_keys, mem_vals, mem_mask = encode_diff(model, p_tensor, device)
+        else:
+            model.eval()
+            mem_keys, mem_vals, mem_mask = encode_frozen(model, p_tensor, device)
+            model.train()
+
+        qa_hidden = sliding_lm_encode(
+            model, q_tensor, window_size, num_passes,
+            mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask)
+        qa_logits = F.linear(qa_hidden, model.embed.weight)
+        qa_loss = F.cross_entropy(
+            qa_logits.reshape(-1, VOCAB_SIZE),
+            tgt_tensor.reshape(-1),
+            ignore_index=pad)
+        total_loss = total_loss + qa_weight * qa_loss
+
+        optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        grad_norm, module_norms = log_gradient_stats(model)
+        tracker.add_loss(total_loss.item())
+        tracker.add_grad_norm(grad_norm)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+
+        if step % 25 == 0 or step == 1:
+            elapsed = time.time() - t0
+            eta = elapsed / step * (steps - step)
+            phase_tag = "D1" if step < context_fade_start else "D2"
+            print(f"  [{phase_tag} {step:>5}/{steps}] "
+                  f"loss={total_loss.item():.4f} "
+                  f"lm={lm_loss.item():.4f} qa={qa_loss.item():.4f} "
+                  f"gnorm={grad_norm:.2f} lr={lr_now:.1e} "
+                  f"spd={tracker.steps_per_sec:.1f}it/s "
+                  f"[{elapsed:.0f}s / ETA {eta:.0f}s]")
+
+        # Evaluation (QA accuracy)
+        if step % eval_interval == 0 or step == steps:
+            acc, breakdown = evaluate_sliding_lm(
+                model, cfg, val_examples, device,
+                window_size=window_size, num_passes=num_passes,
+                encode_fn=encode_frozen)
+            tracker.add_eval(step, acc, breakdown)
+
+            delta = acc - tracker.eval_history[-2][1] if len(tracker.eval_history) > 1 else 0
+            delta_str = f" ({'+' if delta >= 0 else ''}{delta:.1%})" if len(tracker.eval_history) > 1 else ""
+            print(f"\n  ╔══ EVAL @ step {step} ══")
+            print(f"  ║ QA Accuracy: {acc:.1%}{delta_str}  (best: {tracker.best_acc:.1%})")
+            print(f"  ║ LM loss: {lm_loss.item():.4f}  QA loss: {qa_loss.item():.4f}")
+            if breakdown:
+                for n_facts, (corr, tot) in sorted(breakdown.items()):
+                    bar = "█" * int(corr / max(tot, 1) * 20)
+                    print(f"  ║   {n_facts}-fact: {corr:>3}/{tot:>3} = "
+                          f"{corr/max(tot,1):.1%} {bar}")
+            print(f"  ╚{'═' * 30}\n")
+
+            if acc > best_acc:
+                best_acc = acc
+                best_step = step
+                save_path = os.path.join(output_dir, "best_multitask.pt")
+                torch.save({
+                    "model": model.state_dict(),
+                    "step": step,
+                    "accuracy": acc,
+                    "vocab": VOCAB,
+                    "window_size": window_size,
+                    "num_passes": num_passes,
+                    "mode": "multitask",
+                }, save_path)
+                print(f"  ✓ New best! Saved to {save_path}")
+
+            if step - best_step >= eval_interval * 5:
+                print(f"\n  ⚠ Early stopping at step {step} "
+                      f"(no improvement since step {best_step})")
+                ckpt = torch.load(
+                    os.path.join(output_dir, "best_multitask.pt"),
+                    map_location=device, weights_only=True)
+                model.load_state_dict(ckpt["model"])
+                break
+
+    elapsed = time.time() - t0
+    print(f"  Multi-task done in {elapsed:.0f}s, best QA accuracy={best_acc:.1%}")
+    return best_acc
+
+
+# ============================================================================
 # Main Pipeline
 # ============================================================================
 
@@ -2172,6 +2693,16 @@ def main():
                         help="Cross-attention hops (1=standard, 2=multi-hop entity→attribute)")
     parser.add_argument("--d1_ratio", type=float, default=0.2,
                         help="Fraction of Phase D steps for D1 (frozen encoder)")
+    parser.add_argument("--multitask", action="store_true",
+                        help="Multi-task training: LM (shell+wiki) + QA (bAbI)")
+    parser.add_argument("--n_shell", type=int, default=5000,
+                        help="Number of shell command examples for multi-task LM")
+    parser.add_argument("--n_wiki", type=int, default=5000,
+                        help="Number of Wikipedia sentences for multi-task LM")
+    parser.add_argument("--lm_weight", type=float, default=0.5,
+                        help="Weight for LM loss in multi-task training")
+    parser.add_argument("--qa_weight", type=float, default=0.5,
+                        help="Weight for QA loss in multi-task training")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -2304,6 +2835,65 @@ def main():
             "num_passes": num_passes,
             "context_qa_acc": ctx_acc_a,
             "sliding_lm_acc": best_acc,
+            "config": {
+                "d_model": cfg.d_model, "n_layers": cfg.n_layers,
+                "n_heads": cfg.n_heads, "vocab_size": VOCAB_SIZE,
+            },
+            "device": device,
+        }
+    elif args.multitask:
+        # ── Multi-task: LM (shell + wiki) + QA (bAbI) ──
+        window_size = cfg.chunk_size if args.chunk_size is not None else 16
+        num_passes = args.num_passes
+
+        print("\n" + "─" * 60)
+        print(f"  Pipeline: A({args.phase_a_steps}) → MultiTask({args.phase_d_steps})")
+        print("─" * 60)
+
+        # Phase A: LM warmup
+        loss_a = train_phase_a(model, cfg, device, train_examples,
+                               steps=args.phase_a_steps, batch_size=64)
+
+        print("\n  Context QA after Phase A:")
+        ctx_acc_a = evaluate_context_qa(model, cfg, val_examples, device)
+        print(f"  → {ctx_acc_a:.1%}")
+
+        # Multi-task training
+        mt_dir = os.path.join(args.output_dir, "multitask")
+        os.makedirs(mt_dir, exist_ok=True)
+        best_acc = train_multitask(
+            model, cfg, device, train_examples, val_examples, mt_dir,
+            steps=args.phase_d_steps, lr=1e-4, batch_size=32,
+            eval_interval=200,
+            window_size=window_size, num_passes=num_passes,
+            lm_weight=args.lm_weight, qa_weight=args.qa_weight,
+            n_shell=args.n_shell, n_wiki=args.n_wiki,
+        )
+
+        total_time = time.time() - t_start
+        print("\n" + "=" * 60)
+        print("  FINAL REPORT — Multi-Task LM + Memory QA")
+        print("=" * 60)
+        print(f"  Total time:      {total_time:.0f}s ({total_time/60:.1f} min)")
+        print(f"  Parameters:      {n_params:,}")
+        print(f"  Window/passes:   W={window_size} P={num_passes}")
+        print(f"  Weights:         LM={args.lm_weight} QA={args.qa_weight}")
+        print(f"  Data:            {args.n_shell} shell + {args.n_wiki} wiki")
+        print(f"  Context QA:      {ctx_acc_a:.1%} (after Phase A)")
+        print(f"  Multi-task QA:   {best_acc:.1%}")
+
+        report = {
+            "total_time_s": total_time,
+            "n_params": n_params,
+            "mode": "multitask",
+            "window_size": window_size,
+            "num_passes": num_passes,
+            "lm_weight": args.lm_weight,
+            "qa_weight": args.qa_weight,
+            "n_shell": args.n_shell,
+            "n_wiki": args.n_wiki,
+            "context_qa_acc": ctx_acc_a,
+            "multitask_qa_acc": best_acc,
             "config": {
                 "d_model": cfg.d_model, "n_layers": cfg.n_layers,
                 "n_heads": cfg.n_heads, "vocab_size": VOCAB_SIZE,
