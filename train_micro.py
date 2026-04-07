@@ -247,6 +247,52 @@ class QAExample:
     answer: str        # "garden"
     answer_entity: str # the name being asked about
     facts: dict        # {"mary": "garden", "john": "kitchen"}
+    valid_answers: list = None  # for contradictions: all acceptable answers
+
+
+# ============================================================================
+# Source Provenance Tags — chat-like broadcast format
+# ============================================================================
+# Every fact is tagged with its source:
+#   observer/cam7@2026-03-06T10:00:00Z: mary went to the garden .
+#   news/reuters@2026-03-06T10:05:00Z: john walked to the kitchen .
+
+_DATAPLANES = {
+    "observer": ["cam1", "cam2", "cam3", "cam5", "cam7"],
+    "news": ["reuters", "ap", "bbc", "cnn"],
+    "social": ["alice", "bob", "charlie", "diana", "frank"],
+    "wiki": ["article", "editor1", "editor2", "bot"],
+    "shell": ["root", "admin", "deploy", "cron", "user1"],
+    "log": ["syslog", "app1", "auth", "kern"],
+}
+
+
+def _random_tag(dataplane: str = None) -> str:
+    """Generate source tag like 'observer/cam7@2026-03-06T10:05:00Z'."""
+    if dataplane is None:
+        dataplane = random.choice(list(_DATAPLANES.keys()))
+    author = random.choice(_DATAPLANES[dataplane])
+    y = random.choice([2025, 2026])
+    mo = random.randint(1, 12)
+    d = random.randint(1, 28)
+    h = random.randint(0, 23)
+    mi = random.randint(0, 59)
+    s = random.randint(0, 59)
+    return f"{dataplane}/{author}@{y}-{mo:02d}-{d:02d}T{h:02d}:{mi:02d}:{s:02d}Z"
+
+
+def tag_passage(passage: str) -> str:
+    """Tag each sentence in a passage with a source (chat-like broadcast)."""
+    parts = [p.strip() for p in passage.split('.') if p.strip()]
+    tagged = []
+    for part in parts:
+        tagged.append(f"{_random_tag()}: {part} .")
+    return '\n'.join(tagged)
+
+
+def tag_text(text: str, dataplane: str = None) -> str:
+    """Tag a single text with a source prefix."""
+    return f"{_random_tag(dataplane)}: {text}"
 
 
 def generate_single_fact() -> QAExample:
@@ -309,6 +355,25 @@ def generate_distractor() -> QAExample:
     return QAExample(passage, question, facts[target], target, facts)
 
 
+def generate_source_conflict() -> QAExample:
+    """Two sources report the same entity at different locations.
+
+    Already tagged — this generator produces tagged passages directly since
+    the conflict is defined by different sources disagreeing.
+    Both locations are valid answers.
+    """
+    name = random.choice(NAMES)
+    loc1, loc2 = random.sample(LOCATIONS, 2)
+    v1, v2 = random.choice(VERBS), random.choice(VERBS)
+    tag1 = _random_tag()
+    tag2 = _random_tag()
+    passage = (f"{tag1}: {name} {v1} to the {loc1} .\n"
+               f"{tag2}: {name} {v2} to the {loc2} .")
+    question = f"where is {name} ?"
+    return QAExample(passage, question, loc2, name,
+                     {name: loc2}, valid_answers=[loc1, loc2])
+
+
 GENERATORS = [
     (generate_single_fact, 0.15),
     (generate_two_facts, 0.30),
@@ -318,14 +383,29 @@ GENERATORS = [
 ]
 
 
-def generate_dataset(n: int, seed: int = 42) -> list[QAExample]:
-    """Generate n QA examples with weighted type distribution."""
+def generate_dataset(n: int, seed: int = 42, tagged: bool = False,
+                     include_conflicts: bool = False) -> list[QAExample]:
+    """Generate n QA examples with weighted type distribution.
+
+    If tagged=True, each sentence in every passage gets a source tag:
+        observer/cam7@2026-03-06T10:00:00Z: mary went to the garden .
+    If include_conflicts=True, ~10% extra contradiction examples are added.
+    """
     random.seed(seed)
     gens, weights = zip(*GENERATORS)
     examples = []
     for _ in range(n):
         gen = random.choices(gens, weights=weights, k=1)[0]
-        examples.append(gen())
+        ex = gen()
+        if tagged:
+            ex = QAExample(tag_passage(ex.passage), ex.question, ex.answer,
+                           ex.answer_entity, ex.facts, ex.valid_answers)
+        examples.append(ex)
+    if include_conflicts:
+        n_conflicts = int(n * 0.1)
+        for _ in range(n_conflicts):
+            examples.append(generate_source_conflict())
+        random.shuffle(examples)
     return examples
 
 
@@ -1790,6 +1870,16 @@ def evaluate_sliding_lm(model, cfg, examples, device, max_examples=200,
                 is_correct = False
                 break
 
+        # For contradictions: check all valid answers
+        if not is_correct and ex.valid_answers:
+            pred_bytes = [logits[0, n_context - 1 + j, :].argmax().item()
+                          for j in range(len(answer_ids))]
+            for va in ex.valid_answers:
+                va_ids = tokenize(va)
+                if len(va_ids) == len(pred_bytes) and va_ids == pred_bytes:
+                    is_correct = True
+                    break
+
         if is_correct:
             correct += 1
         total += 1
@@ -2327,6 +2417,16 @@ def evaluate_memory_qa(model, cfg, examples, device, max_examples=200,
                 is_correct = False
                 break
 
+        # For contradictions: check all valid answers
+        if not is_correct and ex.valid_answers:
+            pred_bytes = [logits[0, n_context - 1 + j, :].argmax().item()
+                          for j in range(len(answer_ids))]
+            for va in ex.valid_answers:
+                va_ids = tokenize(va)
+                if len(va_ids) == len(pred_bytes) and va_ids == pred_bytes:
+                    is_correct = True
+                    break
+
         if is_correct:
             correct += 1
         total += 1
@@ -2365,6 +2465,10 @@ def evaluate_context_qa(model, cfg, examples, device, max_examples=200):
 
         bos = VOCAB["<bos>"]
         ans_marker = VOCAB["<ans>"]
+        # Truncate passage to fit max_seq_len
+        overhead = 1 + 1 + len(question_ids) + len(answer_ids)  # bos + ans + q + a
+        max_p = cfg.max_seq_len - overhead
+        passage_ids = passage_ids[:max_p]
         inp_ids = [bos] + passage_ids + [ans_marker] + question_ids + answer_ids
         inp = torch.tensor([inp_ids], dtype=torch.long, device=device)
 
@@ -2469,15 +2573,15 @@ def train_multitask(model, cfg, device, train_examples, val_examples,
                     output_dir, steps=5000, lr=1e-4, batch_size=32,
                     eval_interval=200, window_size=16, num_passes=4,
                     lm_weight=0.5, qa_weight=0.5,
-                    n_shell=5000, n_wiki=5000):
+                    n_shell=5000, n_wiki=5000, tagged=False):
     """
     Multi-task training combining:
       1. LM loss on diverse text (shell commands + Wikipedia) via sliding window
       2. QA loss on bAbI via sliding window + memory cross-attention
 
-    The LM task teaches general language modeling / byte patterns.
-    The QA task teaches memory retrieval and reasoning.
-    Both use the same sliding window architecture.
+    If tagged=True, all text is prefixed with source provenance tags:
+      shell/root@2026-04-01T14:22:33Z: ls -la /home/user
+      wiki/article@2025-06-15T08:30:00Z: The French Revolution began in 1789.
     """
     print("\n" + "=" * 60)
     print("  Multi-Task Training: LM + Memory QA")
@@ -2489,6 +2593,7 @@ def train_multitask(model, cfg, device, train_examples, val_examples,
     print(f"  QA weight:       {qa_weight}")
     print(f"  Shell examples:  {n_shell}")
     print(f"  Wiki sentences:  {n_wiki}")
+    print(f"  Source tags:     {'ON' if tagged else 'OFF'}")
 
     pad = VOCAB["<pad>"]
     bos = VOCAB["<bos>"]
@@ -2503,6 +2608,10 @@ def train_multitask(model, cfg, device, train_examples, val_examples,
     wiki_texts = load_wikipedia_sentences(n_wiki, seed=42)
     print(f"    Wiki sentences: {len(wiki_texts)}")
 
+    if tagged:
+        shell_texts = [tag_text(t, dataplane="shell") for t in shell_texts]
+        wiki_texts = [tag_text(t, dataplane="wiki") for t in wiki_texts]
+
     all_lm_texts = shell_texts + wiki_texts
     random.shuffle(all_lm_texts)
     lm_ds = TextLMDataset(all_lm_texts, max_len=cfg.max_seq_len)
@@ -2513,7 +2622,7 @@ def train_multitask(model, cfg, device, train_examples, val_examples,
     # ── Pre-tokenize QA data ──
     encode_frozen = encode_sentence_frozen
     encode_diff = encode_sentence_differentiable
-    max_passage_len = 128
+    max_passage_len = 256 if tagged else 128
     qa_data = []
     for ex in train_examples:
         passage_ids = tokenize(ex.passage)
@@ -2704,6 +2813,8 @@ def main():
                         help="Fraction of Phase D steps for D1 (frozen encoder)")
     parser.add_argument("--multitask", action="store_true",
                         help="Multi-task training: LM (shell+wiki) + QA (bAbI)")
+    parser.add_argument("--tagged", action="store_true",
+                        help="Source provenance tags on all data (chat-like broadcast format)")
     parser.add_argument("--n_shell", type=int, default=5000,
                         help="Number of shell command examples for multi-task LM")
     parser.add_argument("--n_wiki", type=int, default=5000,
@@ -2754,8 +2865,12 @@ def main():
 
     # Generate data
     print(f"\n  Generating {args.n_train} train + {args.n_val} val examples...")
-    train_examples = generate_dataset(args.n_train, seed=args.seed)
-    val_examples = generate_dataset(args.n_val, seed=args.seed + 1)
+    train_examples = generate_dataset(args.n_train, seed=args.seed,
+                                      tagged=args.tagged,
+                                      include_conflicts=args.tagged)
+    val_examples = generate_dataset(args.n_val, seed=args.seed + 1,
+                                    tagged=args.tagged,
+                                    include_conflicts=args.tagged)
 
     # Show data stats
     type_counts = Counter()
@@ -2822,6 +2937,7 @@ def main():
             window_size=window_size, num_passes=num_passes,
             lm_weight=args.lm_weight, qa_weight=args.qa_weight,
             n_shell=args.n_shell, n_wiki=args.n_wiki,
+            tagged=args.tagged,
         )
 
         total_time = time.time() - t_start
