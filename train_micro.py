@@ -3308,9 +3308,21 @@ def train_chat(model, cfg, device, output_dir,
                 lm_hidden = sliding_lm_encode(
                     model, lm_inp, window_size, num_passes, causal=True, stride=stride)
                 lm_logits = F.linear(lm_hidden, model.embed.weight)
-                lm_loss = F.cross_entropy(
-                    lm_logits.reshape(-1, VOCAB_SIZE),
-                    lm_tgt.reshape(-1), ignore_index=pad)
+                if stride > 1:
+                    # Only compute loss on center positions (those actually updated by sliding)
+                    half_w = window_size // 2
+                    B_lm, T_lm = lm_inp.shape
+                    n_win = (T_lm + half_w + (window_size - half_w - 1) - window_size) // stride + 1
+                    center_idx = (torch.arange(n_win, device=device) * stride).clamp(max=T_lm - 1)
+                    lm_logits_s = lm_logits[:, center_idx, :]
+                    lm_tgt_s = lm_tgt[:, center_idx]
+                    lm_loss = F.cross_entropy(
+                        lm_logits_s.reshape(-1, VOCAB_SIZE),
+                        lm_tgt_s.reshape(-1), ignore_index=pad)
+                else:
+                    lm_loss = F.cross_entropy(
+                        lm_logits.reshape(-1, VOCAB_SIZE),
+                        lm_tgt.reshape(-1), ignore_index=pad)
 
             if accum_i == 0:
                 loss_parts['lm'] = lm_loss.item()
