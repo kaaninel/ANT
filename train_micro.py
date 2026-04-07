@@ -20,6 +20,7 @@ import random
 import shutil
 import time
 from collections import Counter
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -1801,7 +1802,8 @@ def encode_sliding_differentiable(model, passages, device, **kwargs):
 # ============================================================================
 
 def sliding_lm_encode(model, input_ids, window_size=5, num_passes=4,
-                      mem_keys=None, mem_vals=None, mem_mask=None):
+                      mem_keys=None, mem_vals=None, mem_mask=None,
+                      causal=False):
     """
     Multi-pass sliding window encoder with optional memory cross-attention.
 
@@ -1809,22 +1811,25 @@ def sliding_lm_encode(model, input_ids, window_size=5, num_passes=4,
       1. Pad edges with PAD embedding (half_w each side)
       2. Create all centered windows via unfold
       3. Process each window through transformer layers
-         - Self-attention within window (bidirectional)
+         - Self-attention within window (causal or bidirectional)
          - Cross-attention to external memory (if provided)
       4. Update each position's hidden from its centered window output
 
-    The memory is shared across all windows — every position can attend to it.
-    This means even with W=5 and 1 pass, the model can route through memory
-    to access any passage information, solving the receptive field problem.
+    With causal=True, each position only attends to itself and earlier
+    positions within its window. Multi-pass refinement grows the effective
+    receptive field: ~half_w * num_passes tokens to the left. Combined with
+    memory cross-attention, this gives local context + global knowledge.
 
     Args:
         model: ANT (with cross-attention layers)
         input_ids: (B, T) token IDs
-        window_size: odd integer, size of sliding window
-        num_passes: number of diffusion-like refinement passes
+        window_size: size of sliding window
+        num_passes: number of refinement passes
         mem_keys: (B, S, d_model) memory keys or None
         mem_vals: (B, S, d_model) memory values or None
         mem_mask: (B, S) bool mask or None
+        causal: if True, use causal (left-to-right) attention within windows.
+                Required for autoregressive LM training and generation.
 
     Returns:
         hidden: (B, T, d_model) final hidden states (norm applied)
@@ -1846,8 +1851,13 @@ def sliding_lm_encode(model, input_ids, window_size=5, num_passes=4,
     cos = model.rope_cos[:window_size]
     sin = model.rope_sin[:window_size]
 
-    # Bidirectional attention mask (all-to-all within window)
-    mask = torch.zeros(window_size, window_size, device=device)
+    # Attention mask: causal (left-to-right) or bidirectional (all-to-all)
+    if causal:
+        mask = torch.triu(
+            torch.full((window_size, window_size), float('-inf'), device=device),
+            diagonal=1)
+    else:
+        mask = torch.zeros(window_size, window_size, device=device)
 
     # Expand memory for windowed processing: (B, S, D) → (B*T, S, D)
     w_mem_keys, w_mem_vals, w_mem_mask = None, None, None
@@ -1886,7 +1896,7 @@ def sliding_lm_encode(model, input_ids, window_size=5, num_passes=4,
 @torch.no_grad()
 def evaluate_sliding_lm(model, cfg, examples, device, max_examples=200,
                         window_size=5, num_passes=4,
-                        encode_fn=None):
+                        encode_fn=None, causal=False):
     """
     Evaluate sliding window LM on bAbI QA.
 
@@ -1924,7 +1934,8 @@ def evaluate_sliding_lm(model, cfg, examples, device, max_examples=200,
 
         hidden = sliding_lm_encode(
             model, input_tensor, window_size, num_passes,
-            mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask)
+            mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask,
+            causal=causal)
 
         # Compute logits at all positions, check answer tokens (teacher-forced)
         logits = F.linear(hidden, model.embed.weight)  # (1, T, vocab_size)
@@ -1963,6 +1974,95 @@ def evaluate_sliding_lm(model, cfg, examples, device, max_examples=200,
     model.train()
     breakdown = {k: (type_correct[k], type_total[k]) for k in type_total}
     return accuracy, breakdown
+
+
+# ============================================================================
+# Sliding Window Autoregressive Generation
+# ============================================================================
+
+@torch.no_grad()
+def sliding_generate(model, prompt_ids, max_new_tokens=256,
+                     temperature=0.8, top_k=40, top_p=0.9,
+                     window_size=8, num_passes=4,
+                     mem_keys=None, mem_vals=None, mem_mask=None,
+                     stop_token=None, callback=None):
+    """
+    Autoregressive generation using causal sliding windows.
+
+    At each step, runs full causal sliding_lm_encode over the entire sequence,
+    takes the last hidden state, projects to logits, and samples.
+
+    This gives every generated token access to:
+    - Local context (~half_w * num_passes tokens back) via causal sliding
+    - Global knowledge (all stored facts) via memory cross-attention
+    - Multi-pass refinement of representations
+
+    Args:
+        model: ANT model
+        prompt_ids: list of token IDs for the prompt
+        max_new_tokens: maximum tokens to generate
+        temperature: sampling temperature (0 = greedy)
+        top_k: top-k filtering (0 = no filtering)
+        top_p: nucleus sampling threshold (1.0 = no filtering)
+        window_size: sliding window size
+        num_passes: number of refinement passes
+        mem_keys/vals/mask: optional memory for cross-attention
+        stop_token: stop generation at this token (default: EOS)
+        callback: optional function called with each new token id
+
+    Returns:
+        list of all token IDs (prompt + generated)
+    """
+    if stop_token is None:
+        stop_token = EOS_ID
+    model.eval()
+    device = next(model.parameters()).device
+    tokens = list(prompt_ids)
+
+    for _ in range(max_new_tokens):
+        inp = torch.tensor([tokens], dtype=torch.long, device=device)
+        hidden = sliding_lm_encode(
+            model, inp, window_size, num_passes,
+            mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask,
+            causal=True)
+
+        # Logits at last position
+        logits = F.linear(hidden[:, -1:, :], model.embed.weight).squeeze(0).squeeze(0)
+
+        # Temperature scaling
+        if temperature > 0 and temperature != 1.0:
+            logits = logits / temperature
+
+        # Top-k filtering
+        if top_k > 0:
+            topk_vals, _ = logits.topk(min(top_k, logits.size(-1)))
+            logits[logits < topk_vals[-1]] = float('-inf')
+
+        # Top-p (nucleus) filtering
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumprobs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+            remove = cumprobs > top_p
+            remove[..., 1:] = remove[..., :-1].clone()
+            remove[..., 0] = False
+            sorted_logits[remove] = float('-inf')
+            logits.scatter_(0, sorted_indices, sorted_logits)
+
+        # Sample
+        if temperature == 0:
+            next_tok = logits.argmax().item()
+        else:
+            probs = torch.softmax(logits, dim=-1)
+            next_tok = torch.multinomial(probs, 1).item()
+
+        if next_tok == stop_token:
+            break
+
+        tokens.append(next_tok)
+        if callback:
+            callback(next_tok)
+
+    return tokens
 
 
 def train_sliding_lm(model, cfg, device, train_examples, val_examples,
@@ -2843,8 +2943,526 @@ def train_multitask(model, cfg, device, train_examples, val_examples,
 
 
 # ============================================================================
-# Main Pipeline
+# Chat Data Generation — diverse conversational training pairs
 # ============================================================================
+
+_CHAT_FACTUAL = [
+    ("What is the capital of France?", "Paris is the capital of France."),
+    ("What is the capital of Japan?", "Tokyo is the capital of Japan."),
+    ("What is the capital of Germany?", "Berlin is the capital of Germany."),
+    ("What is the capital of Italy?", "Rome is the capital of Italy."),
+    ("What is the capital of Spain?", "Madrid is the capital of Spain."),
+    ("What is the capital of Brazil?", "Brasilia is the capital of Brazil."),
+    ("What is the capital of Australia?", "Canberra is the capital of Australia."),
+    ("What is the capital of Canada?", "Ottawa is the capital of Canada."),
+    ("What is the largest ocean?", "The Pacific Ocean is the largest ocean on Earth."),
+    ("What is the smallest continent?", "Australia is the smallest continent."),
+    ("What is the longest river?", "The Nile is often considered the longest river."),
+    ("What is the tallest mountain?", "Mount Everest is the tallest mountain."),
+    ("Who wrote Romeo and Juliet?", "William Shakespeare wrote Romeo and Juliet."),
+    ("Who painted the Mona Lisa?", "Leonardo da Vinci painted the Mona Lisa."),
+    ("Who discovered penicillin?", "Alexander Fleming discovered penicillin."),
+    ("Who invented the telephone?", "Alexander Graham Bell invented the telephone."),
+    ("What is photosynthesis?", "Photosynthesis converts sunlight into energy in plants."),
+    ("What is gravity?", "Gravity is the force that attracts objects toward each other."),
+    ("What is DNA?", "DNA carries the genetic instructions for all living organisms."),
+    ("What is the speed of light?", "The speed of light is about 300,000 km per second."),
+    ("How many planets are in our solar system?", "There are eight planets in our solar system."),
+    ("What is the chemical formula for water?", "The formula for water is H2O."),
+    ("What year did World War II end?", "World War II ended in 1945."),
+    ("What is the largest planet?", "Jupiter is the largest planet in our solar system."),
+    ("What is the boiling point of water?", "Water boils at 100 degrees Celsius."),
+    ("How many continents are there?", "There are seven continents on Earth."),
+    ("What is the human body temperature?", "Normal body temperature is about 37 degrees Celsius."),
+    ("What is the freezing point of water?", "Water freezes at 0 degrees Celsius."),
+    ("What language has the most speakers?", "Mandarin Chinese has the most native speakers."),
+    ("What is the hardest natural substance?", "Diamond is the hardest natural substance."),
+]
+
+_CHAT_GREETINGS = [
+    ("Hello!", "Hello! How can I help you?"),
+    ("Hi there", "Hi! What can I do for you?"),
+    ("Good morning", "Good morning! How are you today?"),
+    ("Hey", "Hey! What's up?"),
+    ("Good evening", "Good evening! How can I assist you?"),
+    ("How are you?", "I'm doing well, thank you for asking!"),
+    ("What's your name?", "I'm ANT, an Addressable Neural Transformer."),
+    ("Thanks!", "You're welcome!"),
+    ("Thank you very much", "Happy to help!"),
+    ("Goodbye", "Goodbye! Have a great day!"),
+    ("See you later", "See you! Take care!"),
+    ("Nice to meet you", "Nice to meet you too!"),
+]
+
+_CHAT_TECHNICAL = [
+    ("What is a variable?", "A variable stores a value that can change during execution."),
+    ("What is a function?", "A function is a reusable block of code that performs a task."),
+    ("What is an array?", "An array is an ordered collection of elements."),
+    ("What is a loop?", "A loop repeats a block of code multiple times."),
+    ("What is recursion?", "Recursion is when a function calls itself."),
+    ("What is an API?", "An API is an interface for programs to communicate."),
+    ("What is a database?", "A database is an organized collection of structured data."),
+    ("What is HTTP?", "HTTP is the protocol used to transfer web pages."),
+    ("What is a class?", "A class is a blueprint for creating objects."),
+    ("What is inheritance?", "Inheritance lets a class derive from another class."),
+    ("What is Python?", "Python is a high-level interpreted programming language."),
+    ("What is JavaScript?", "JavaScript is a language for web development."),
+    ("What is Linux?", "Linux is an open-source operating system kernel."),
+    ("What is Git?", "Git is a distributed version control system."),
+    ("What is a compiler?", "A compiler translates source code into machine code."),
+    ("What does CPU stand for?", "CPU stands for Central Processing Unit."),
+    ("What does RAM stand for?", "RAM stands for Random Access Memory."),
+    ("What is machine learning?", "Machine learning trains algorithms to learn from data."),
+    ("What is a neural network?", "A neural network is layers of connected nodes that learn."),
+    ("What is encryption?", "Encryption converts data into a coded form for security."),
+]
+
+_CHAT_YESNO = [
+    ("Is Python a programming language?", "Yes, Python is a programming language."),
+    ("Is the Earth flat?", "No, the Earth is roughly spherical."),
+    ("Can fish breathe underwater?", "Yes, fish breathe using gills underwater."),
+    ("Is the sun a star?", "Yes, the sun is a star."),
+    ("Do plants need water?", "Yes, plants need water to survive."),
+    ("Is Mars the closest planet to Earth?", "No, Venus is the closest planet to Earth."),
+    ("Can humans live on Mars?", "Not yet, but research is ongoing."),
+    ("Is water a compound?", "Yes, water is a compound made of hydrogen and oxygen."),
+    ("Is gold a metal?", "Yes, gold is a precious metal."),
+    ("Do all birds fly?", "No, some birds like penguins and ostriches cannot fly."),
+]
+
+_CHAT_OPENENDED = [
+    ("Tell me about the moon.", "The moon is Earth's only natural satellite. It orbits Earth every 27 days."),
+    ("Explain how rain forms.", "Water evaporates, rises, condenses into clouds, then falls as rain."),
+    ("How do computers work?", "Computers process data using a CPU that executes instructions in binary."),
+    ("What causes seasons?", "Seasons occur because Earth's axis is tilted relative to its orbit."),
+    ("How does the internet work?", "The internet connects computers through networks using protocols like TCP/IP."),
+    ("Why is the sky blue?", "The sky appears blue because the atmosphere scatters shorter blue wavelengths."),
+    ("How do magnets work?", "Magnets create a field that attracts certain metals through electron alignment."),
+    ("What causes earthquakes?", "Earthquakes occur when tectonic plates suddenly shift along faults."),
+    ("How do batteries work?", "Batteries convert chemical energy into electrical energy through reactions."),
+    ("What is evolution?", "Evolution is the gradual change in species through natural selection over time."),
+]
+
+_CHAT_SHELL = [
+    ("How do I list files?", "Use `ls -la` to list all files with details."),
+    ("How to find a file?", "Use `find . -name 'filename'` to search for files."),
+    ("How to search in files?", "Use `grep -r 'pattern' .` to search recursively."),
+    ("How to copy a file?", "Use `cp source destination` to copy files."),
+    ("How to delete a file?", "Use `rm filename` to delete a file."),
+    ("How to create a directory?", "Use `mkdir dirname` to create a new directory."),
+    ("How to check disk usage?", "Use `df -h` for disk space or `du -sh *` for sizes."),
+    ("How to view processes?", "Use `ps aux` or `top` to view running processes."),
+    ("How to change permissions?", "Use `chmod 755 file` to set read/write/execute permissions."),
+    ("How to compress files?", "Use `tar -czf archive.tar.gz files/` to compress."),
+    ("How to install a package?", "Use `pip install package` for Python or `npm install` for Node."),
+    ("How to check git status?", "Use `git status` to see modified and staged files."),
+]
+
+_CHAT_MARKDOWN = [
+    ("How to make a heading?", "Use `# Heading` for h1, `## Heading` for h2, and so on."),
+    ("How to make bold text?", "Wrap text with double asterisks: `**bold text**`."),
+    ("How to make a link?", "Use `[text](url)` to create a hyperlink."),
+    ("How to make a list?", "Use `- item` for bullets or `1. item` for numbered lists."),
+    ("How to add code?", "Use backticks for inline `` `code` `` or triple backticks for blocks."),
+    ("How to add an image?", "Use `![alt text](image-url)` to embed images."),
+    ("How to make a table?", "Use pipes and dashes: `| col1 | col2 |` with `|---|---|`."),
+    ("How to add a quote?", "Use `> text` to create a blockquote."),
+]
+
+
+def generate_chat_data(n: int = 5000, seed: int = 42) -> list[str]:
+    """Generate diverse chat training pairs in tagged format.
+
+    Each pair is a complete exchange:
+        localhost/user/chat@timestamp: question
+        localhost/ant/chat@timestamp: answer
+
+    Returns list of formatted chat strings, each fitting in ~192 bytes.
+    """
+    random.seed(seed)
+
+    all_pairs = []
+    all_pairs.extend([(q, a, "social") for q, a in _CHAT_GREETINGS])
+    all_pairs.extend([(q, a, "factual") for q, a in _CHAT_FACTUAL])
+    all_pairs.extend([(q, a, "technical") for q, a in _CHAT_TECHNICAL])
+    all_pairs.extend([(q, a, "yesno") for q, a in _CHAT_YESNO])
+    all_pairs.extend([(q, a, "open") for q, a in _CHAT_OPENENDED])
+    all_pairs.extend([(q, a, "shell") for q, a in _CHAT_SHELL])
+    all_pairs.extend([(q, a, "markdown") for q, a in _CHAT_MARKDOWN])
+
+    # Generate tagged pairs
+    results = []
+    for _ in range(n):
+        q, a, category = random.choice(all_pairs)
+
+        # User tag
+        user_ts = _random_timestamp()
+        user_tag = f"localhost/user/chat@{user_ts}"
+
+        # Agent tag (1 second later)
+        agent_ts = user_ts  # close enough for training
+        agent_tag = f"localhost/ant/chat@{agent_ts}"
+
+        text = f"{user_tag}: {q}\n{agent_tag}: {a}"
+
+        # Ensure it fits in ~190 bytes (leaving room for BOS/EOS)
+        text_bytes = text.encode('utf-8')
+        if len(text_bytes) > 188:
+            # Truncate answer to fit
+            overhead = len(f"{user_tag}: {q}\n{agent_tag}: ".encode('utf-8'))
+            max_answer_bytes = 188 - overhead
+            if max_answer_bytes > 10:
+                a_bytes = a.encode('utf-8')[:max_answer_bytes]
+                a_trunc = a_bytes.decode('utf-8', errors='ignore').rsplit(' ', 1)[0]
+                text = f"{user_tag}: {q}\n{agent_tag}: {a_trunc}"
+            else:
+                continue  # skip if too long even with truncation
+
+        results.append(text)
+
+    return results
+
+
+# ============================================================================
+# Unified Chat Training — Causal Sliding Windows Throughout
+# ============================================================================
+
+def train_chat(model, cfg, device, output_dir,
+               steps_phase1=5000, steps_phase2=5000, steps_phase3=5000,
+               lr=3e-4, batch_size=32, eval_interval=250,
+               window_size=8, num_passes=4,
+               n_wiki=50000, n_shell=5000, n_qa=20000, n_chat=5000,
+               use_bf16=False, hf_repo=None, hf_upload_interval=1000):
+    """
+    3-phase chat training using CAUSAL sliding windows for all losses.
+
+    All LM, QA, and chat losses go through causal sliding_lm_encode.
+    No standard causal forward anywhere — sliding window is the unified path.
+
+    Phase 1: English LM only (Wikipedia + shell)
+    Phase 2: LM + Memory QA (bAbI with passage → memory → cross-attention)
+    Phase 3: LM + QA + Chat (tagged conversational pairs)
+    """
+    from torch.amp import GradScaler, autocast
+    total_steps = steps_phase1 + steps_phase2 + steps_phase3
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float32
+    amp_device = 'cuda' if device == 'cuda' else device
+    scaler = GradScaler(amp_device) if use_bf16 and device == 'cuda' else None
+
+    print("\n" + "=" * 60)
+    print("  ANT — Unified Causal Sliding Window Training")
+    print("=" * 60)
+    print(f"  Window size:     {window_size}")
+    print(f"  Num passes:      {num_passes}")
+    print(f"  Batch size:      {batch_size}")
+    print(f"  BF16:            {use_bf16}")
+    print(f"  Phase 1 (LM):    {steps_phase1} steps")
+    print(f"  Phase 2 (LM+QA): {steps_phase2} steps")
+    print(f"  Phase 3 (all):   {steps_phase3} steps")
+    print(f"  Total:           {total_steps} steps")
+    print(f"  Output:          {output_dir}")
+
+    pad = VOCAB["<pad>"]
+    bos = VOCAB["<bos>"]
+    eos = VOCAB["<eos>"]
+    ans = VOCAB["<ans>"]
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ── Load all data ──
+    print("\n  Loading data...")
+    wiki_texts = load_wikipedia_sentences(n_wiki, seed=42)
+    print(f"    Wikipedia: {len(wiki_texts)} sentences")
+    shell_texts = generate_shell_texts(n_shell, seed=42)
+    print(f"    Shell:     {len(shell_texts)} commands")
+    chat_texts = generate_chat_data(n_chat, seed=42)
+    print(f"    Chat:      {len(chat_texts)} pairs")
+
+    # QA data
+    train_qa = generate_dataset(n_qa, seed=42, tagged=False)
+    val_qa = generate_dataset(500, seed=43, tagged=False)
+    print(f"    QA train:  {len(train_qa)} examples")
+    print(f"    QA val:    {len(val_qa)} examples")
+
+    # Pre-tokenize QA
+    max_passage_len = 128
+    qa_data = []
+    for ex in train_qa:
+        p_ids = tokenize(ex.passage)[:max_passage_len]
+        while len(p_ids) < max_passage_len:
+            p_ids.append(pad)
+        q_ids = tokenize(ex.question)
+        a_ids = tokenize(ex.answer)
+        full_seq = [bos, ans] + q_ids + a_ids + [eos]
+        inp_ids = full_seq[:-1]
+        n_ctx = 2 + len(q_ids)
+        tgt_ids = [pad] * (n_ctx - 1) + a_ids + [eos]
+        qa_data.append((inp_ids, tgt_ids, p_ids))
+
+    # Build LM datasets
+    lm_texts = wiki_texts + shell_texts
+    random.shuffle(lm_texts)
+    lm_ds = TextLMDataset(lm_texts, max_len=cfg.max_seq_len)
+    chat_ds = TextLMDataset(chat_texts, max_len=cfg.max_seq_len)
+    print(f"    LM dataset:   {len(lm_ds)} samples")
+    print(f"    Chat dataset: {len(chat_ds)} samples")
+
+    # Optimizer with weight decay
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1)
+    model.train()
+
+    t_start = time.time()
+    tracker = TrainingTracker(window=50)
+    best_qa_acc = 0.0
+    best_step = 0
+    global_step = 0
+    encode_frozen = encode_sentence_frozen
+    encode_diff = encode_sentence_differentiable
+
+    def get_phase(step):
+        if step <= steps_phase1:
+            return 1
+        elif step <= steps_phase1 + steps_phase2:
+            return 2
+        else:
+            return 3
+
+    def phase_lr(step):
+        phase = get_phase(step)
+        if phase == 1:
+            return get_lr(step, 200, steps_phase1, lr, lr * 0.01)
+        elif phase == 2:
+            phase_step = step - steps_phase1
+            return get_lr(phase_step, 100, steps_phase2, lr * 0.67, lr * 0.01)
+        else:
+            phase_step = step - steps_phase1 - steps_phase2
+            return get_lr(phase_step, 100, steps_phase3, lr * 0.33, lr * 0.01)
+
+    # Data loaders (recreated per phase)
+    lm_loader = DataLoader(lm_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    lm_iter = iter(lm_loader)
+    chat_loader = DataLoader(chat_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    chat_iter = iter(chat_loader)
+
+    print(f"\n  {'─' * 56}")
+    print(f"  Training started at {time.strftime('%H:%M:%S')}")
+    print(f"  {'─' * 56}")
+
+    for step in range(1, total_steps + 1):
+        global_step = step
+        tracker.tick()
+        phase = get_phase(step)
+
+        lr_now = phase_lr(step)
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr_now
+
+        total_loss = torch.tensor(0.0, device=device)
+        loss_parts = {}
+
+        amp_ctx = autocast(amp_device, dtype=amp_dtype) if use_bf16 else nullcontext()
+
+        # ── LM loss via causal sliding window (all phases) ──
+        try:
+            lm_inp, lm_tgt = next(lm_iter)
+        except StopIteration:
+            lm_iter = iter(lm_loader)
+            lm_inp, lm_tgt = next(lm_iter)
+        lm_inp, lm_tgt = lm_inp.to(device), lm_tgt.to(device)
+
+        with amp_ctx:
+            lm_hidden = sliding_lm_encode(
+                model, lm_inp, window_size, num_passes, causal=True)
+            lm_logits = F.linear(lm_hidden, model.embed.weight)
+            lm_loss = F.cross_entropy(
+                lm_logits.reshape(-1, VOCAB_SIZE),
+                lm_tgt.reshape(-1), ignore_index=pad)
+        loss_parts['lm'] = lm_loss.item()
+
+        if phase == 1:
+            total_loss = lm_loss
+        elif phase == 2:
+            total_loss = total_loss + 0.5 * lm_loss
+        else:
+            total_loss = total_loss + 0.34 * lm_loss
+
+        # ── QA loss via causal sliding + memory (phase 2+) ──
+        if phase >= 2:
+            batch_idx = random.sample(range(len(qa_data)), batch_size)
+            batch = [qa_data[i] for i in batch_idx]
+            max_slen = max(len(b[0]) for b in batch)
+            inp_b, tgt_b, p_b = [], [], []
+            for inp_ids, tgt_ids, p_ids in batch:
+                inp_b.append(inp_ids + [pad] * (max_slen - len(inp_ids)))
+                tgt_b.append(tgt_ids + [pad] * (max_slen - len(tgt_ids)))
+                p_b.append(p_ids)
+
+            q_t = torch.tensor(inp_b, dtype=torch.long, device=device)
+            tgt_t = torch.tensor(tgt_b, dtype=torch.long, device=device)
+            p_t = torch.tensor(p_b, dtype=torch.long, device=device)
+
+            # Memory encoding (frozen D1 for first 30% of phase 2)
+            phase2_step = step - steps_phase1
+            d1_threshold = int(steps_phase2 * 0.3)
+            with amp_ctx:
+                if phase == 2 and phase2_step < d1_threshold:
+                    model.eval()
+                    mk, mv, mm = encode_frozen(model, p_t, device)
+                    model.train()
+                else:
+                    mk, mv, mm = encode_diff(model, p_t, device)
+
+                qa_hidden = sliding_lm_encode(
+                    model, q_t, window_size, num_passes,
+                    mem_keys=mk, mem_vals=mv, mem_mask=mm, causal=True)
+                qa_logits = F.linear(qa_hidden, model.embed.weight)
+                qa_loss = F.cross_entropy(
+                    qa_logits.reshape(-1, VOCAB_SIZE),
+                    tgt_t.reshape(-1), ignore_index=pad)
+            loss_parts['qa'] = qa_loss.item()
+
+            if phase == 2:
+                total_loss = total_loss + 0.5 * qa_loss
+            else:
+                total_loss = total_loss + 0.33 * qa_loss
+
+        # ── Chat loss via causal sliding (phase 3) ──
+        if phase == 3:
+            try:
+                ch_inp, ch_tgt = next(chat_iter)
+            except StopIteration:
+                chat_iter = iter(chat_loader)
+                ch_inp, ch_tgt = next(chat_iter)
+            ch_inp, ch_tgt = ch_inp.to(device), ch_tgt.to(device)
+
+            with amp_ctx:
+                ch_hidden = sliding_lm_encode(
+                    model, ch_inp, window_size, num_passes, causal=True)
+                ch_logits = F.linear(ch_hidden, model.embed.weight)
+                ch_loss = F.cross_entropy(
+                    ch_logits.reshape(-1, VOCAB_SIZE),
+                    ch_tgt.reshape(-1), ignore_index=pad)
+            loss_parts['chat'] = ch_loss.item()
+            total_loss = total_loss + 0.33 * ch_loss
+
+        # ── Backward + step ──
+        optimizer.zero_grad(set_to_none=True)
+        if scaler is not None:
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
+            grad_norm, _ = log_gradient_stats(model)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            total_loss.backward()
+            grad_norm, _ = log_gradient_stats(model)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+        tracker.add_loss(total_loss.item())
+        tracker.add_grad_norm(grad_norm)
+        if step % 25 == 0 or step == 1:
+            elapsed = time.time() - t_start
+            eta = elapsed / step * (total_steps - step)
+            parts_str = " ".join(f"{k}={v:.4f}" for k, v in loss_parts.items())
+            vram_str = ""
+            if device == "cuda" and torch.cuda.is_available():
+                vram_gb = torch.cuda.max_memory_allocated() / 1e9
+                vram_str = f" VRAM={vram_gb:.1f}GB"
+            print(f"  [P{phase} {step:>5}/{total_steps}] "
+                  f"loss={total_loss.item():.4f} {parts_str} "
+                  f"gnorm={grad_norm:.2f} lr={lr_now:.1e} "
+                  f"spd={tracker.steps_per_sec:.1f}it/s{vram_str} "
+                  f"[{elapsed:.0f}s / ETA {eta:.0f}s]")
+
+        # ── Phase transition logging ──
+        if step == steps_phase1:
+            print(f"\n  ══ Phase 1 → 2: Adding Memory QA ══\n")
+        elif step == steps_phase1 + steps_phase2:
+            print(f"\n  ══ Phase 2 → 3: Adding Chat ══\n")
+
+        # ── Evaluation ──
+        if step % eval_interval == 0 or step == total_steps:
+            # LM sample via sliding generation
+            model.eval()
+            prompt = [bos] + tokenize("The ")
+            gen_tokens = sliding_generate(
+                model, prompt, max_new_tokens=80,
+                temperature=0.7, top_k=30,
+                window_size=window_size, num_passes=num_passes)
+            lm_sample = detokenize(gen_tokens)[:80]
+
+            # QA accuracy (if phase 2+)
+            qa_acc = 0.0
+            if phase >= 2:
+                qa_acc, breakdown = evaluate_sliding_lm(
+                    model, cfg, val_qa[:100], device,
+                    window_size=window_size, num_passes=num_passes,
+                    encode_fn=encode_frozen, causal=True)
+                tracker.add_eval(step, qa_acc, breakdown)
+
+                if qa_acc > best_qa_acc:
+                    best_qa_acc = qa_acc
+                    best_step = step
+
+            # Print eval
+            print(f"\n  ╔══ EVAL @ step {step} (Phase {phase}) ══")
+            if phase >= 2:
+                print(f"  ║ QA Accuracy: {qa_acc:.1%}  (best: {best_qa_acc:.1%})")
+            print(f"  ║ LM loss: {loss_parts.get('lm', 0):.4f}")
+            if 'qa' in loss_parts:
+                print(f"  ║ QA loss: {loss_parts['qa']:.4f}")
+            if 'chat' in loss_parts:
+                print(f"  ║ Chat loss: {loss_parts['chat']:.4f}")
+            print(f"  ║ Sample: {lm_sample}")
+            print(f"  ╚{'═' * 40}\n")
+            model.train()
+
+            # Save checkpoint
+            save_path = os.path.join(output_dir, "checkpoint_latest.pt")
+            ckpt_data = {
+                "model": model.state_dict(),
+                "step": step,
+                "phase": phase,
+                "qa_accuracy": qa_acc,
+                "best_qa_accuracy": best_qa_acc,
+                "vocab": VOCAB,
+                "window_size": window_size,
+                "num_passes": num_passes,
+                "mode": "chat",
+                "config": {k: getattr(cfg, k) for k in [
+                    'd_model', 'n_heads', 'head_dim', 'ffn_dim', 'n_layers',
+                    'max_seq_len', 'use_memory_cross_attention',
+                ]},
+            }
+            torch.save(ckpt_data, save_path)
+
+            if qa_acc >= best_qa_acc and phase >= 2:
+                best_path = os.path.join(output_dir, "checkpoint_best.pt")
+                torch.save(ckpt_data, best_path)
+                print(f"  ✓ Best checkpoint saved (QA: {qa_acc:.1%})")
+
+            # Upload to HF Hub
+            if hf_repo and (step % hf_upload_interval == 0 or step == total_steps):
+                try:
+                    from huggingface_hub import HfApi
+                    api = HfApi()
+                    api.upload_file(
+                        path_or_fileobj=save_path,
+                        path_in_repo="checkpoints/chat/checkpoint_latest.pt",
+                        repo_id=hf_repo, repo_type="model")
+                    print(f"    ↑ Uploaded to HF: {hf_repo}")
+                except Exception as e:
+                    print(f"    ⚠ HF upload failed: {e}")
+
+    elapsed = time.time() - t_start
+    print(f"\n  {'═' * 56}")
+    print(f"  Training complete in {elapsed:.0f}s ({elapsed/60:.1f} min)")
+    print(f"  Best QA accuracy: {best_qa_acc:.1%} at step {best_step}")
+    print(f"  Speed: {total_steps/elapsed:.2f} it/s avg")
+    print(f"  {'═' * 56}")
+
+    return best_qa_acc
 
 def main():
     parser = argparse.ArgumentParser(description="Micro Prototype Training")
@@ -2878,6 +3496,14 @@ def main():
                         help="Fraction of Phase D steps for D1 (frozen encoder)")
     parser.add_argument("--multitask", action="store_true",
                         help="Multi-task training: LM (shell+wiki) + QA (bAbI)")
+    parser.add_argument("--chat", action="store_true",
+                        help="Unified chat training: LM + QA + Chat via causal sliding windows")
+    parser.add_argument("--chat_steps1", type=int, default=5000,
+                        help="Phase 1 steps (LM only) for --chat mode")
+    parser.add_argument("--chat_steps2", type=int, default=5000,
+                        help="Phase 2 steps (LM + QA) for --chat mode")
+    parser.add_argument("--chat_steps3", type=int, default=5000,
+                        help="Phase 3 steps (LM + QA + Chat) for --chat mode")
     parser.add_argument("--tagged", action="store_true",
                         help="Source provenance tags on all data (chat-like broadcast format)")
     parser.add_argument("--n_shell", type=int, default=5000,
@@ -2888,6 +3514,14 @@ def main():
                         help="Weight for LM loss in multi-task training")
     parser.add_argument("--qa_weight", type=float, default=0.5,
                         help="Weight for QA loss in multi-task training")
+    parser.add_argument("--bf16", action="store_true",
+                        help="Use BF16 mixed precision (A100/H100)")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Training batch size (increase for A100)")
+    parser.add_argument("--eval_interval", type=int, default=250,
+                        help="Evaluate every N steps")
+    parser.add_argument("--hf_repo", type=str, default=None,
+                        help="HuggingFace repo for checkpoint uploads (e.g. kaaninel/ANT)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -2975,7 +3609,50 @@ def main():
     # ===== Full Training Pipeline =====
     t_start = time.time()
 
-    if args.multitask:
+    if args.chat:
+        # ── Unified Chat Training: causal sliding windows throughout ──
+        window_size = cfg.chunk_size if args.chunk_size is not None else 8
+        num_passes = args.num_passes
+        chat_dir = os.path.join(args.output_dir, "chat")
+        os.makedirs(chat_dir, exist_ok=True)
+
+        best_acc = train_chat(
+            model, cfg, device, chat_dir,
+            steps_phase1=args.chat_steps1,
+            steps_phase2=args.chat_steps2,
+            steps_phase3=args.chat_steps3,
+            lr=3e-4, batch_size=args.batch_size,
+            eval_interval=args.eval_interval,
+            window_size=window_size, num_passes=num_passes,
+            n_wiki=args.n_wiki, n_shell=args.n_shell,
+            n_qa=args.n_train, n_chat=5000,
+            use_bf16=args.bf16, hf_repo=args.hf_repo,
+        )
+
+        total_time = time.time() - t_start
+        print("\n" + "=" * 60)
+        print("  FINAL REPORT — Unified Chat Training")
+        print("=" * 60)
+        print(f"  Total time:      {total_time:.0f}s ({total_time/60:.1f} min)")
+        print(f"  Parameters:      {n_params:,}")
+        print(f"  Window/passes:   W={window_size} P={num_passes}")
+        print(f"  Best QA:         {best_acc:.1%}")
+        print(f"  Checkpoint:      {chat_dir}/checkpoint_best.pt")
+
+        report = {
+            "total_time_s": total_time,
+            "n_params": n_params,
+            "mode": "chat",
+            "window_size": window_size,
+            "num_passes": num_passes,
+            "best_qa_acc": best_acc,
+            "device": device,
+        }
+        with open(os.path.join(chat_dir, "report.json"), "w") as f:
+            json.dump(report, f, indent=2)
+        return
+
+    elif args.multitask:
         # ── Multi-task: LM (shell + wiki) + QA (bAbI) ──
         window_size = cfg.chunk_size if args.chunk_size is not None else 16
         num_passes = args.num_passes

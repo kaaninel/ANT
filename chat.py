@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 """
-ANT (Addressable Neural Transformer) — Interactive Chat CLI
+ANT Terminal Canvas — Collaborative tagged event stream interface.
 
-Loads a trained checkpoint and provides an interactive terminal interface
-for testing the model with autoregressive byte-level generation.
-
-Supports:
-  - Free-form text generation (LM mode)
-  - Memory-backed QA (passage → memory → question → answer)
-  - Configurable sampling (temperature, top-k, top-p)
-  - Conversation history with source tagging
+Every line is a spatiotemporal event: host/user/path@timestamp: content
+The model reads and writes this stream natively.
 
 Usage:
-    python chat.py                                    # auto-detect checkpoint
-    python chat.py --checkpoint path/to/best.pt       # specific checkpoint
-    python chat.py --device cuda                      # force device
-    python chat.py --temperature 0.8 --top_k 50       # sampling params
+    python chat.py                              # auto-detect checkpoint
+    python chat.py --checkpoint path/to/best.pt # specific checkpoint
+    python chat.py --agent ant                  # set agent name
+    python chat.py --host myserver              # set host name
+
+Modes:
+    Default text   → tagged as host/user/chat@now: content
+    !command       → real shell execution, output tagged as host/shell/cwd@now:
+    /commands      → system commands (help, config, memory, etc.)
 """
 
 import argparse
 import os
+import platform
 import re
+import readline  # noqa: F401 — enables arrow keys in input()
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 import torch
 import torch.nn.functional as F
@@ -30,7 +33,6 @@ import torch.nn.functional as F
 from config import ModelConfig, MemoryConfig
 from model import ANT, StaticKVCache
 
-# Import training utilities for tokenization and encoding
 from train_micro import (
     VOCAB, VOCAB_SIZE, ID2WORD, PAD_ID, BOS_ID, EOS_ID, ANS_ID,
     tokenize, detokenize,
@@ -38,12 +40,19 @@ from train_micro import (
     tag_text, tag_passage, _TAG_REGISTRY, _DOMAIN_MAP,
 )
 
-# Matches source provenance tags: host/user/path@timestamp: content
+
+# ── Tag parsing ──────────────────────────────────────────────────────────────
+
 _TAG_RE = re.compile(
     r'^([^/]+)/([^/]+)/([^@]*)@(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z): '
 )
 
-# ANSI color codes per host
+# ANSI codes
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_ITALIC = "\033[3m"
+
 _HOST_COLORS = {
     "localhost": "\033[35m",  # magenta
     "server1":  "\033[36m",  # cyan
@@ -51,29 +60,61 @@ _HOST_COLORS = {
     "news":     "\033[33m",  # yellow
     "cam1":     "\033[34m",  # blue
 }
-_RESET = "\033[0m"
-_BOLD = "\033[1m"
-_DIM = "\033[2m"
+
+_USER_COLORS = {
+    "shell": "\033[31m",     # red for shell
+    "root":  "\033[31m",
+}
+
+
+def _now_tag() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def make_tag(host: str, user: str, path: str) -> str:
+    """Build a full tag string: host/user/path@timestamp: """
+    return f"{host}/{user}/{path}@{_now_tag()}: "
 
 
 def format_tagged_line(line: str) -> str:
-    """Parse a source tag and return a color-formatted line.
-
-    Input:  'localhost/alice/chat@2026-04-07T17:04:13Z: Hello world'
-    Output: '\033[1m\033[35m[localhost/alice]\033[0m \033[2m~/chat\033[0m Hello world'
-    """
+    """Parse a tag and return a color-formatted line for display."""
     m = _TAG_RE.match(line)
     if not m:
         return line
-    host, user, path, timestamp = m.group(1), m.group(2), m.group(3), m.group(4)
+    host, user, path, ts = m.group(1), m.group(2), m.group(3), m.group(4)
     content = line[m.end():]
-    color = _HOST_COLORS.get(host, "\033[37m")
-    return f"{_BOLD}{color}[{host}/{user}]{_RESET} {_DIM}{path}{_RESET} {content}"
+    hcolor = _HOST_COLORS.get(host, "\033[37m")
+    ucolor = _USER_COLORS.get(user, hcolor)
+    return f"{_BOLD}{ucolor}{user}{_RESET}{_DIM}@{host}/{path}{_RESET} {content}"
 
+
+def render_markdown_line(text: str) -> str:
+    """Basic ANSI markdown rendering for a single line."""
+    # Headers
+    if text.startswith("### "):
+        return f"{_BOLD}{text[4:]}{_RESET}"
+    if text.startswith("## "):
+        return f"{_BOLD}\033[4m{text[3:]}{_RESET}"
+    if text.startswith("# "):
+        return f"{_BOLD}\033[4m\033[1m{text[2:]}{_RESET}"
+    # Code fences
+    if text.startswith("```"):
+        return f"{_DIM}{'─' * 40}{_RESET}"
+    # Bullet lists
+    if text.startswith("- ") or text.startswith("* "):
+        return f"  {_BOLD}•{_RESET} {text[2:]}"
+    # Bold
+    text = re.sub(r'\*\*(.+?)\*\*', f'{_BOLD}\\1{_RESET}', text)
+    # Inline code
+    text = re.sub(r'`(.+?)`', f'{_DIM}\\1{_RESET}', text)
+    return text
+
+
+# ── Model loading ────────────────────────────────────────────────────────────
 
 def load_model(checkpoint_path: str, device: str):
-    """Load model from checkpoint."""
-    print(f"  Loading checkpoint: {checkpoint_path}")
+    """Load ANT model from checkpoint."""
+    print(f"  Loading: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     cfg = ModelConfig()
@@ -93,205 +134,130 @@ def load_model(checkpoint_path: str, device: str):
     step = ckpt.get("step", "?")
     acc = ckpt.get("accuracy", 0)
     mode = ckpt.get("mode", "unknown")
-    window_size = ckpt.get("window_size", cfg.chunk_size)
-    num_passes = ckpt.get("num_passes", 4)
-
-    print(f"  Model loaded: step={step}, accuracy={acc:.1%}, mode={mode}")
-    print(f"  Config: d_model={cfg.d_model}, n_layers={cfg.n_layers}, "
-          f"W={window_size}, P={num_passes}")
+    print(f"  Model: step={step}, QA={acc:.0%}, mode={mode}, "
+          f"d={cfg.d_model}, L={cfg.n_layers}, {sum(p.numel() for p in model.parameters())/1e6:.2f}M params")
 
     return model, cfg, ckpt
 
 
+# ── Generation ───────────────────────────────────────────────────────────────
+
+def sample_next(logits, generated, temperature=0.8, top_k=50, top_p=0.9,
+                repetition_penalty=1.2):
+    """Sample next token from logits with configurable strategies."""
+    next_logits = logits[0, -1, :].float()
+
+    if repetition_penalty != 1.0:
+        for prev_id in set(generated[-50:]):
+            if next_logits[prev_id] > 0:
+                next_logits[prev_id] /= repetition_penalty
+            else:
+                next_logits[prev_id] *= repetition_penalty
+
+    if temperature > 0:
+        next_logits = next_logits / temperature
+
+    if top_k > 0:
+        indices_to_remove = next_logits < torch.topk(next_logits, top_k)[0][-1]
+        next_logits[indices_to_remove] = float('-inf')
+
+    if top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+        sorted_indices_to_remove[0] = False
+        indices_to_remove = sorted_indices[sorted_indices_to_remove]
+        next_logits[indices_to_remove] = float('-inf')
+
+    if temperature > 0:
+        probs = F.softmax(next_logits, dim=-1)
+        return torch.multinomial(probs, 1).item()
+    return next_logits.argmax().item()
+
+
 @torch.no_grad()
-def generate_autoregressive(model, cfg, prompt_ids, device,
-                            max_new_tokens=200, temperature=0.8,
-                            top_k=50, top_p=0.9, repetition_penalty=1.2,
-                            mem_keys=None, mem_vals=None, mem_mask=None,
-                            use_sliding=False, window_size=8, num_passes=4,
-                            stop_on_eos=True, stream=True, strip_output_tags=False):
-    """Generate tokens autoregressively with configurable sampling."""
+def generate(model, cfg, prompt_ids, device, callback=None,
+             max_new_tokens=200, temperature=0.8, top_k=50, top_p=0.9,
+             repetition_penalty=1.2,
+             mem_keys=None, mem_vals=None, mem_mask=None,
+             use_sliding=False, window_size=8, num_passes=4):
+    """Generate tokens and call callback(token_id) for each one.
+
+    Returns the full list of generated token IDs.
+    """
     model.eval()
 
     if use_sliding:
         return _generate_sliding(
-            model, cfg, prompt_ids, device, max_new_tokens, temperature,
-            top_k, top_p, repetition_penalty,
-            mem_keys, mem_vals, mem_mask,
-            window_size, num_passes, stop_on_eos, stream,
-            strip_output_tags)
+            model, cfg, prompt_ids, device, callback,
+            max_new_tokens, temperature, top_k, top_p, repetition_penalty,
+            mem_keys, mem_vals, mem_mask, window_size, num_passes)
 
-    # Standard causal generation with KV cache
     input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     B, T = input_ids.shape
 
+    # Cap max_new_tokens to stay within RoPE buffer
+    rope_len = model.rope_cos.shape[0]
+    max_new_tokens = min(max_new_tokens, rope_len - T - 1)
+    if max_new_tokens <= 0:
+        return []
+
     cache = model.make_cache(B, max_seq=T + max_new_tokens, device=device)
 
-    # Prefill
     logits, _, cache = model(input_ids, kv_cache=cache, cache_position=0,
                              memory_keys=mem_keys, memory_values=mem_vals,
                              memory_mask=mem_mask)
 
     generated = list(prompt_ids)
     pos = T
-    line_buf = []  # Buffer for tag-aware line output
 
     for _ in range(max_new_tokens):
-        next_logits = logits[0, -1, :].float()
-
-        # Repetition penalty
-        if repetition_penalty != 1.0:
-            for prev_id in set(generated[-50:]):
-                if next_logits[prev_id] > 0:
-                    next_logits[prev_id] /= repetition_penalty
-                else:
-                    next_logits[prev_id] *= repetition_penalty
-
-        # Temperature
-        if temperature > 0:
-            next_logits = next_logits / temperature
-
-        # Top-K filtering
-        if top_k > 0:
-            indices_to_remove = next_logits < torch.topk(next_logits, top_k)[0][-1]
-            next_logits[indices_to_remove] = float('-inf')
-
-        # Top-P (nucleus) filtering
-        if top_p < 1.0:
-            sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-            sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-            sorted_indices_to_remove[0] = False
-            indices_to_remove = sorted_indices[sorted_indices_to_remove]
-            next_logits[indices_to_remove] = float('-inf')
-
-        # Sample
-        if temperature > 0:
-            probs = F.softmax(next_logits, dim=-1)
-            next_token = torch.multinomial(probs, 1).item()
-        else:
-            next_token = next_logits.argmax().item()
-
+        next_token = sample_next(logits, generated, temperature, top_k, top_p,
+                                 repetition_penalty)
         generated.append(next_token)
 
-        if stop_on_eos and next_token == EOS_ID:
+        if next_token == EOS_ID:
             break
 
-        # Stream output with tag-aware line buffering
-        if stream:
-            if next_token == ord('\n'):
-                line = bytes(line_buf).decode('utf-8', errors='replace')
-                if strip_output_tags:
-                    line = format_tagged_line(line)
-                print(line, flush=True)
-                line_buf = []
-            else:
-                line_buf.append(next_token)
-                # Buffer until tag window passes (~42 chars) to parse tags
-                if not strip_output_tags or len(line_buf) > 45:
-                    chunk = bytes(line_buf).decode('utf-8', errors='replace')
-                    if strip_output_tags:
-                        chunk = format_tagged_line(chunk)
-                    print(chunk, end='', flush=True)
-                    line_buf = []
+        if callback:
+            callback(next_token)
 
-        # Next step
         next_input = torch.tensor([[next_token]], dtype=torch.long, device=device)
         logits, _, cache = model(next_input, kv_cache=cache, cache_position=pos,
                                  memory_keys=mem_keys, memory_values=mem_vals,
                                  memory_mask=mem_mask)
         pos += 1
 
-    # Flush remaining buffer
-    if stream and line_buf:
-        line = bytes(line_buf).decode('utf-8', errors='replace')
-        if strip_output_tags:
-            line = format_tagged_line(line)
-        print(line)
-    elif stream:
-        print()
-
     return generated[len(prompt_ids):]
 
 
 @torch.no_grad()
-def _generate_sliding(model, cfg, prompt_ids, device,
+def _generate_sliding(model, cfg, prompt_ids, device, callback,
                       max_new_tokens, temperature, top_k, top_p,
                       repetition_penalty,
                       mem_keys, mem_vals, mem_mask,
-                      window_size, num_passes, stop_on_eos, stream,
-                      strip_output_tags=False):
-    """Generate using sliding window encoder (bidirectional per window)."""
+                      window_size, num_passes):
+    """Sliding window generation with causal per-window encoding."""
     generated = list(prompt_ids)
-    line_buf = []
 
     for _ in range(max_new_tokens):
         input_tensor = torch.tensor([generated], dtype=torch.long, device=device)
         hidden = sliding_lm_encode(
             model, input_tensor, window_size, num_passes,
-            mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask)
+            mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask,
+            causal=True)
         logits = F.linear(hidden, model.embed.weight)
-        next_logits = logits[0, -1, :].float()
 
-        # Repetition penalty
-        if repetition_penalty != 1.0:
-            for prev_id in set(generated[-50:]):
-                if next_logits[prev_id] > 0:
-                    next_logits[prev_id] /= repetition_penalty
-                else:
-                    next_logits[prev_id] *= repetition_penalty
-
-        if temperature > 0:
-            next_logits = next_logits / temperature
-
-        if top_k > 0:
-            indices_to_remove = next_logits < torch.topk(next_logits, top_k)[0][-1]
-            next_logits[indices_to_remove] = float('-inf')
-
-        if top_p < 1.0:
-            sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-            sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-            sorted_indices_to_remove[0] = False
-            indices_to_remove = sorted_indices[sorted_indices_to_remove]
-            next_logits[indices_to_remove] = float('-inf')
-
-        if temperature > 0:
-            probs = F.softmax(next_logits, dim=-1)
-            next_token = torch.multinomial(probs, 1).item()
-        else:
-            next_token = next_logits.argmax().item()
-
+        next_token = sample_next(logits, generated, temperature, top_k, top_p,
+                                 repetition_penalty)
         generated.append(next_token)
 
-        if stop_on_eos and next_token == EOS_ID:
+        if next_token == EOS_ID:
             break
 
-        if stream:
-            if next_token == ord('\n'):
-                line = bytes(line_buf).decode('utf-8', errors='replace')
-                if strip_output_tags:
-                    line = format_tagged_line(line)
-                print(line, flush=True)
-                line_buf = []
-            else:
-                line_buf.append(next_token)
-                if not strip_output_tags or len(line_buf) > 45:
-                    chunk = bytes(line_buf).decode('utf-8', errors='replace')
-                    if strip_output_tags:
-                        chunk = format_tagged_line(chunk)
-                    print(chunk, end='', flush=True)
-                    line_buf = []
-
-    if stream and line_buf:
-        line = bytes(line_buf).decode('utf-8', errors='replace')
-        if strip_output_tags:
-            line = format_tagged_line(line)
-        print(line)
-    elif stream:
-        print()
+        if callback:
+            callback(next_token)
 
     return generated[len(prompt_ids):]
 
@@ -306,46 +272,411 @@ def encode_passage_to_memory(model, passage_text, device, tagged=False):
     return mem_keys, mem_vals, mem_mask
 
 
-HELP_TEXT = """
-╔══════════════════════════════════════════════════════════════╗
-║                       ANT Chat CLI                           ║
-╠══════════════════════════════════════════════════════════════╣
-║  Commands:                                                   ║
-║    /help          - Show this help                           ║
-║    /quit          - Exit                                     ║
-║    /mode lm       - Free-form text generation (default)      ║
-║    /mode qa       - Memory-backed QA mode                    ║
-║    /mode sliding   - Sliding window generation               ║
-║    /temp <float>  - Set temperature (0=greedy, default=0.8)  ║
-║    /topk <int>    - Set top-k (default=50, 0=disabled)       ║
-║    /topp <float>  - Set top-p nucleus (default=0.9)          ║
-║    /maxlen <int>  - Set max generation length (default=200)  ║
-║    /rep <float>   - Set repetition penalty (default=1.2)     ║
-║    /remember <text> - Store text in memory (QA mode)         ║
-║    /forget         - Clear stored memory                     ║
-║    /memory         - Show stored passages                    ║
-║    /ask <question> - Ask about stored passages (QA mode)     ║
-║    /config         - Show current settings                   ║
-║                                                              ║
-║  In LM mode: just type text and press Enter to generate      ║
-║  In QA mode: use /remember and /ask                          ║
-╚══════════════════════════════════════════════════════════════╝
+# ── Streaming renderer ───────────────────────────────────────────────────────
+
+class StreamRenderer:
+    """Accumulates generated bytes and renders tagged lines with ANSI formatting.
+
+    Buffers output until a newline is seen (to detect and format tags),
+    then flushes with format_tagged_line + render_markdown_line.
+    """
+
+    def __init__(self):
+        self.line_buf = []
+        self.all_bytes = []
+        self._first_line = True
+
+    def feed(self, token_id: int):
+        """Process one generated byte token."""
+        self.all_bytes.append(token_id)
+
+        if token_id == ord('\n'):
+            self._flush_line(newline=True)
+        else:
+            self.line_buf.append(token_id)
+            # Flush after tag detection window (~50 chars) if no tag found
+            if len(self.line_buf) > 55:
+                text = bytes(self.line_buf).decode('utf-8', errors='replace')
+                if not _TAG_RE.match(text):
+                    # No tag — flush as raw content
+                    rendered = render_markdown_line(text)
+                    print(rendered, end='', flush=True)
+                    self.line_buf = []
+
+    def _flush_line(self, newline=True):
+        if not self.line_buf:
+            if newline:
+                print(flush=True)
+            return
+        line = bytes(self.line_buf).decode('utf-8', errors='replace')
+        self.line_buf = []
+
+        # Parse tag, format, then render markdown on content
+        m = _TAG_RE.match(line)
+        if m:
+            formatted = format_tagged_line(line)
+            # Apply markdown rendering to the content portion
+            content_start = line[m.end():]
+            tag_display = formatted[:formatted.index(content_start)] if content_start in formatted else ""
+            rendered_content = render_markdown_line(content_start)
+            print(f"{tag_display}{rendered_content}", end='\n' if newline else '', flush=True)
+        else:
+            print(render_markdown_line(line), end='\n' if newline else '', flush=True)
+
+    def finish(self):
+        """Flush any remaining buffered content."""
+        if self.line_buf:
+            self._flush_line(newline=True)
+        elif self.all_bytes and self.all_bytes[-1] != ord('\n'):
+            print(flush=True)
+
+    def get_text(self) -> str:
+        return bytes(self.all_bytes).decode('utf-8', errors='replace')
+
+
+# ── Terminal Canvas ──────────────────────────────────────────────────────────
+
+HELP_TEXT = f"""
+{_BOLD}ANT Terminal Canvas{_RESET} — Collaborative tagged event stream
+
+{_BOLD}Input modes:{_RESET}
+  text          Chat with the agent (tagged automatically)
+  !command      Execute shell command (output fed to agent context)
+
+{_BOLD}Commands:{_RESET}
+  /help         Show this help
+  /quit         Exit
+  /config       Show current settings
+  /temp <f>     Set temperature (0=greedy, default=0.8)
+  /topk <n>     Set top-k (default=50)
+  /topp <f>     Set top-p (default=0.9)
+  /maxlen <n>   Set max generation length (default=200)
+  /rep <f>      Set repetition penalty (default=1.2)
+  /remember <t> Store passage in memory
+  /forget       Clear memory
+  /memory       Show stored passages
+  /ask <q>      Ask a question about stored passages
+  /context      Show conversation context (last N events)
+  /clear        Clear conversation context
+  /agent <name> Switch agent persona
+  /sliding      Toggle sliding window mode
 """
 
 
+class TerminalCanvas:
+    """Main application state and loop."""
+
+    def __init__(self, model, cfg, ckpt, device, host, username, agent_name,
+                 window_size, num_passes, tagged=True):
+        self.model = model
+        self.cfg = cfg
+        self.device = device
+        self.host = host
+        self.username = username
+        self.agent = agent_name
+        self.window_size = window_size
+        self.num_passes = num_passes
+        self.tagged = tagged
+        self.use_sliding = (ckpt.get("mode") == "sliding_lm"
+                            or ckpt.get("mode") == "multitask")
+
+        # Sampling params
+        self.temperature = 0.8
+        self.top_k = 50
+        self.top_p = 0.9
+        self.max_tokens = 200
+        self.rep_penalty = 1.2
+
+        # Conversation context (list of tagged event strings)
+        self.context: list[str] = []
+        self.max_context_bytes = cfg.max_seq_len * 3  # keep last N bytes of context
+
+        # Memory
+        self.passages: list[str] = []
+        self.mem_keys = None
+        self.mem_vals = None
+        self.mem_mask = None
+
+        # Shell
+        self.cwd = os.getcwd()
+
+    def _user_tag(self, path="chat") -> str:
+        return make_tag(self.host, self.username, path)
+
+    def _agent_tag(self, path="chat") -> str:
+        return make_tag(self.host, self.agent, path)
+
+    def _shell_tag(self) -> str:
+        # Use relative path from home, or absolute
+        try:
+            relpath = os.path.relpath(self.cwd, os.path.expanduser("~"))
+            if relpath.startswith(".."):
+                path = self.cwd.lstrip("/")
+            else:
+                path = relpath
+        except ValueError:
+            path = self.cwd.lstrip("/")
+        return make_tag(self.host, "shell", path)
+
+    def _context_ids(self) -> list[int]:
+        """Build token IDs from recent conversation context."""
+        joined = "\n".join(self.context)
+        # Trim to fit context budget
+        while len(joined.encode('utf-8')) > self.max_context_bytes and self.context:
+            self.context.pop(0)
+            joined = "\n".join(self.context)
+        return tokenize(joined)
+
+    def _generate_response(self, prompt_suffix="", qa_mode=False):
+        """Generate agent response given current context.
+
+        qa_mode: if True, uses [BOS, ANS] + question format (matching training).
+        """
+        agent_tag = self._agent_tag()
+
+        if qa_mode:
+            # QA format from training: [BOS, ANS, question_ids...]
+            # Question is the last context entry (untagged)
+            last = self.context[-1] if self.context else ""
+            # Strip tag if present
+            m = _TAG_RE.match(last)
+            question = last[m.end():] if m else last
+            prompt_ids = [BOS_ID, ANS_ID] + tokenize(question)
+            # QA also uses sliding — unified architecture
+            use_sliding = self.use_sliding
+        else:
+            full_context = "\n".join(self.context) + "\n" + agent_tag + prompt_suffix
+            prompt_ids = [BOS_ID] + tokenize(full_context)
+            use_sliding = self.use_sliding
+
+        # Print agent label before streaming content
+        agent_label = format_tagged_line(agent_tag + "...")
+        agent_label = agent_label.rsplit("...", 1)[0]  # strip placeholder
+        print(agent_label, end='', flush=True)
+
+        renderer = StreamRenderer()
+
+        t0 = time.time()
+        tokens = generate(
+            self.model, self.cfg, prompt_ids, self.device,
+            callback=renderer.feed,
+            max_new_tokens=self.max_tokens,
+            temperature=self.temperature,
+            top_k=self.top_k, top_p=self.top_p,
+            repetition_penalty=self.rep_penalty,
+            mem_keys=self.mem_keys, mem_vals=self.mem_vals,
+            mem_mask=self.mem_mask,
+            use_sliding=use_sliding,
+            window_size=self.window_size,
+            num_passes=self.num_passes)
+        renderer.finish()
+        elapsed = time.time() - t0
+
+        response_text = renderer.get_text()
+        self.context.append(agent_tag + response_text)
+
+        n = len(tokens)
+        print(f"{_DIM}  [{n} tok, {elapsed:.1f}s, {n/max(elapsed,0.001):.0f} tok/s]{_RESET}")
+
+    def handle_shell(self, cmd: str):
+        """Execute a shell command and feed output into context."""
+        shell_tag = self._shell_tag()
+        print(f"{format_tagged_line(shell_tag + cmd)}")
+
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True,
+                timeout=30, cwd=self.cwd)
+            output = result.stdout
+            if result.stderr:
+                output += result.stderr
+            output = output.strip()
+        except subprocess.TimeoutExpired:
+            output = "[command timed out after 30s]"
+        except Exception as e:
+            output = f"[error: {e}]"
+
+        # Handle cd commands
+        if cmd.strip().startswith("cd "):
+            target = cmd.strip()[3:].strip()
+            target = os.path.expanduser(target)
+            new_cwd = os.path.join(self.cwd, target)
+            if os.path.isdir(new_cwd):
+                self.cwd = os.path.realpath(new_cwd)
+
+        # Display and record output
+        if output:
+            for line in output.split('\n')[:50]:  # cap at 50 lines
+                tagged_line = self._shell_tag() + line
+                print(format_tagged_line(tagged_line))
+                self.context.append(tagged_line)
+        self.context.append(shell_tag + cmd)
+
+    def handle_command(self, cmd: str, arg: str):
+        """Handle /slash commands."""
+        if cmd == "/help":
+            print(HELP_TEXT)
+        elif cmd == "/quit":
+            print(f"\n{_DIM}Goodbye.{_RESET}")
+            sys.exit(0)
+        elif cmd == "/config":
+            print(f"  Host:        {self.host}")
+            print(f"  User:        {self.username}")
+            print(f"  Agent:       {self.agent}")
+            print(f"  Sliding:     {self.use_sliding}")
+            print(f"  Temperature: {self.temperature}")
+            print(f"  Top-K:       {self.top_k}")
+            print(f"  Top-P:       {self.top_p}")
+            print(f"  Max tokens:  {self.max_tokens}")
+            print(f"  Rep penalty: {self.rep_penalty}")
+            print(f"  Tagged:      {self.tagged}")
+            print(f"  Window:      {self.window_size}")
+            print(f"  Passes:      {self.num_passes}")
+            print(f"  Context:     {len(self.context)} events")
+            print(f"  CWD:         {self.cwd}")
+            print(f"  Passages:    {len(self.passages)}")
+        elif cmd == "/temp":
+            try:
+                self.temperature = float(arg)
+                print(f"  Temperature → {self.temperature}")
+            except ValueError:
+                print("  Usage: /temp <float>")
+        elif cmd == "/topk":
+            try:
+                self.top_k = int(arg)
+                print(f"  Top-K → {self.top_k}")
+            except ValueError:
+                print("  Usage: /topk <int>")
+        elif cmd == "/topp":
+            try:
+                self.top_p = float(arg)
+                print(f"  Top-P → {self.top_p}")
+            except ValueError:
+                print("  Usage: /topp <float>")
+        elif cmd == "/maxlen":
+            try:
+                self.max_tokens = int(arg)
+                print(f"  Max tokens → {self.max_tokens}")
+            except ValueError:
+                print("  Usage: /maxlen <int>")
+        elif cmd == "/rep":
+            try:
+                self.rep_penalty = float(arg)
+                print(f"  Repetition penalty → {self.rep_penalty}")
+            except ValueError:
+                print("  Usage: /rep <float>")
+        elif cmd == "/remember":
+            if not arg:
+                print("  Usage: /remember <passage text>")
+            else:
+                self.passages.append(arg)
+                full_passage = " . ".join(self.passages) + " ."
+                self.mem_keys, self.mem_vals, self.mem_mask = \
+                    encode_passage_to_memory(self.model, full_passage,
+                                             self.device, tagged=self.tagged)
+                n_valid = self.mem_mask[0].sum().item() if self.mem_mask is not None else 0
+                print(f"  ✓ Stored. {len(self.passages)} passage(s), "
+                      f"{n_valid} memory slots active.")
+        elif cmd == "/forget":
+            self.passages = []
+            self.mem_keys = self.mem_vals = self.mem_mask = None
+            print("  ✓ Memory cleared.")
+        elif cmd == "/memory":
+            if not self.passages:
+                print("  No passages stored. Use /remember <text>")
+            else:
+                for i, p in enumerate(self.passages, 1):
+                    print(f"  [{i}] {p}")
+                n_valid = self.mem_mask[0].sum().item() if self.mem_mask is not None else 0
+                print(f"  → {n_valid} memory slots active")
+        elif cmd == "/ask":
+            if not arg:
+                print("  Usage: /ask <question>")
+            elif self.mem_keys is None:
+                print("  No passages stored. Use /remember first.")
+            else:
+                question = arg if arg.endswith("?") else arg + " ?"
+                q_tagged = self._user_tag() + question
+                self.context.append(q_tagged)
+                print(format_tagged_line(q_tagged))
+                # Generate QA response with ANS_ID trigger
+                self._generate_response(qa_mode=True)
+        elif cmd == "/context":
+            n = int(arg) if arg and arg.isdigit() else 10
+            events = self.context[-n:]
+            print(f"  {_DIM}── Last {len(events)} events ──{_RESET}")
+            for ev in events:
+                print(f"  {format_tagged_line(ev)}")
+        elif cmd == "/clear":
+            self.context = []
+            print("  ✓ Context cleared.")
+        elif cmd == "/agent":
+            if arg:
+                self.agent = arg
+                print(f"  Agent → {self.agent}")
+            else:
+                print(f"  Current agent: {self.agent}")
+        elif cmd == "/sliding":
+            self.use_sliding = not self.use_sliding
+            print(f"  Sliding window → {'ON' if self.use_sliding else 'OFF'}")
+        else:
+            print(f"  Unknown command: {cmd}. Type /help for commands.")
+
+    def run(self):
+        """Main input loop."""
+        prompt_color = _HOST_COLORS.get(self.host, "\033[37m")
+
+        while True:
+            try:
+                prompt = f"{_BOLD}{prompt_color}{self.username}{_RESET}{_DIM}@{self.host}{_RESET}> "
+                user_input = input(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n{_DIM}Goodbye.{_RESET}")
+                break
+
+            if not user_input:
+                continue
+
+            # Shell execution
+            if user_input.startswith("!"):
+                cmd = user_input[1:].strip()
+                if cmd:
+                    self.handle_shell(cmd)
+                    # Let agent react to shell output
+                    self._generate_response()
+                continue
+
+            # Slash commands
+            if user_input.startswith("/"):
+                parts = user_input.split(None, 1)
+                cmd = parts[0].lower()
+                arg = parts[1] if len(parts) > 1 else ""
+                self.handle_command(cmd, arg)
+                continue
+
+            # Chat: tag user input, generate agent response
+            user_event = self._user_tag() + user_input
+            self.context.append(user_event)
+            print(format_tagged_line(user_event))
+            self._generate_response()
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
+
 def main():
-    parser = argparse.ArgumentParser(description="ANT Chat CLI")
+    parser = argparse.ArgumentParser(description="ANT Terminal Canvas")
     parser.add_argument("--checkpoint", default=None,
                         help="Path to model checkpoint (.pt)")
     parser.add_argument("--device", default=None,
                         help="Force device (cpu/mps/cuda)")
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top_k", type=int, default=50)
-    parser.add_argument("--top_p", type=float, default=0.9)
-    parser.add_argument("--max_tokens", type=int, default=200)
-    parser.add_argument("--repetition_penalty", type=float, default=1.2)
-    parser.add_argument("--tagged", action="store_true",
-                        help="Use source provenance tags")
+    parser.add_argument("--host", default=None,
+                        help="Host name for tags (default: hostname)")
+    parser.add_argument("--user", default=None,
+                        help="Username for tags (default: system user)")
+    parser.add_argument("--agent", default="ant",
+                        help="Agent persona name (default: ant)")
+    parser.add_argument("--no-tags", action="store_true",
+                        help="Disable source tagging")
     args = parser.parse_args()
 
     # Auto-detect device
@@ -358,10 +689,16 @@ def main():
     else:
         device = "cpu"
 
+    # Auto-detect host/user
+    host = args.host or platform.node().split('.')[0].lower() or "localhost"
+    username = args.user or os.environ.get("USER", "user").lower()
+
     # Auto-detect checkpoint
     ckpt_path = args.checkpoint
     if ckpt_path is None:
         candidates = [
+            "checkpoints/chat/best_model.pt",
+            "checkpoints/tag_test/multitask/best_multitask.pt",
             "checkpoints/local_test/multitask/best_multitask.pt",
             "checkpoints/micro/multitask/best_multitask.pt",
             "checkpoints/micro/sliding_lm/best_model.pt",
@@ -373,179 +710,28 @@ def main():
                 ckpt_path = c
                 break
         if ckpt_path is None:
-            print("ERROR: No checkpoint found. Train a model first or specify --checkpoint.")
+            print("ERROR: No checkpoint found. Train first or use --checkpoint.")
             sys.exit(1)
 
-    print("=" * 62)
-    print("  ANT — Interactive Chat CLI")
-    print("=" * 62)
+    # Banner
+    print(f"\n{_BOLD}  ANT Terminal Canvas{_RESET}")
+    print(f"  {'─' * 42}")
 
     model, cfg, ckpt = load_model(ckpt_path, device)
     window_size = ckpt.get("window_size", cfg.chunk_size)
     num_passes = ckpt.get("num_passes", 4)
 
-    # State
-    mode = "lm"
-    temperature = args.temperature
-    top_k = args.top_k
-    top_p = args.top_p
-    max_tokens = args.max_tokens
-    rep_penalty = args.repetition_penalty
-    tagged = args.tagged
-    stored_passages = []
-    mem_keys, mem_vals, mem_mask = None, None, None
+    canvas = TerminalCanvas(
+        model, cfg, ckpt, device,
+        host=host, username=username, agent_name=args.agent,
+        window_size=window_size, num_passes=num_passes,
+        tagged=not args.no_tags)
 
-    print(f"\n  Device: {device} | Mode: {mode} | Temp: {temperature}")
-    print(f"  Type /help for commands\n")
+    print(f"  {_DIM}Device: {device} | Agent: {args.agent} | "
+          f"Sliding: {canvas.use_sliding}{_RESET}")
+    print(f"  {_DIM}Type /help for commands, !cmd for shell{_RESET}\n")
 
-    while True:
-        try:
-            user_input = input("\033[1;36myou>\033[0m ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n  Goodbye!")
-            break
-
-        if not user_input:
-            continue
-
-        # Command handling
-        if user_input.startswith("/"):
-            parts = user_input.split(maxsplit=1)
-            cmd = parts[0].lower()
-            arg = parts[1] if len(parts) > 1 else ""
-
-            if cmd == "/quit" or cmd == "/exit":
-                print("  Goodbye!")
-                break
-            elif cmd == "/help":
-                print(HELP_TEXT)
-            elif cmd == "/mode":
-                if arg in ("lm", "qa", "sliding"):
-                    mode = arg
-                    print(f"  Mode → {mode}")
-                else:
-                    print("  Usage: /mode lm|qa|sliding")
-            elif cmd == "/temp":
-                try:
-                    temperature = float(arg)
-                    print(f"  Temperature → {temperature}")
-                except ValueError:
-                    print("  Usage: /temp <float>")
-            elif cmd == "/topk":
-                try:
-                    top_k = int(arg)
-                    print(f"  Top-K → {top_k}")
-                except ValueError:
-                    print("  Usage: /topk <int>")
-            elif cmd == "/topp":
-                try:
-                    top_p = float(arg)
-                    print(f"  Top-P → {top_p}")
-                except ValueError:
-                    print("  Usage: /topp <float>")
-            elif cmd == "/maxlen":
-                try:
-                    max_tokens = int(arg)
-                    print(f"  Max tokens → {max_tokens}")
-                except ValueError:
-                    print("  Usage: /maxlen <int>")
-            elif cmd == "/rep":
-                try:
-                    rep_penalty = float(arg)
-                    print(f"  Repetition penalty → {rep_penalty}")
-                except ValueError:
-                    print("  Usage: /rep <float>")
-            elif cmd == "/remember":
-                if not arg:
-                    print("  Usage: /remember <passage text>")
-                else:
-                    stored_passages.append(arg)
-                    # Re-encode all passages
-                    full_passage = " . ".join(stored_passages) + " ."
-                    mem_keys, mem_vals, mem_mask = encode_passage_to_memory(
-                        model, full_passage, device, tagged=tagged)
-                    n_valid = mem_mask[0].sum().item() if mem_mask is not None else 0
-                    print(f"  ✓ Stored. {len(stored_passages)} passage(s), "
-                          f"{n_valid} memory slots active.")
-            elif cmd == "/forget":
-                stored_passages = []
-                mem_keys, mem_vals, mem_mask = None, None, None
-                print("  ✓ Memory cleared.")
-            elif cmd == "/memory":
-                if not stored_passages:
-                    print("  No passages stored. Use /remember <text>")
-                else:
-                    for i, p in enumerate(stored_passages, 1):
-                        print(f"  [{i}] {p}")
-                    n_valid = mem_mask[0].sum().item() if mem_mask is not None else 0
-                    print(f"  → {n_valid} memory slots active")
-            elif cmd == "/ask":
-                if not arg:
-                    print("  Usage: /ask <question>")
-                elif mem_keys is None:
-                    print("  No passages stored. Use /remember first.")
-                else:
-                    question = arg
-                    if not question.endswith("?"):
-                        question += " ?"
-                    prompt = [BOS_ID, ANS_ID] + tokenize(question)
-                    print(f"\033[1;33mbot>\033[0m ", end='', flush=True)
-                    t0 = time.time()
-                    tokens = generate_autoregressive(
-                        model, cfg, prompt, device,
-                        max_new_tokens=max_tokens, temperature=temperature,
-                        top_k=top_k, top_p=top_p, repetition_penalty=rep_penalty,
-                        mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask,
-                        use_sliding=(mode == "sliding"),
-                        window_size=window_size, num_passes=num_passes,
-                        stream=True, strip_output_tags=tagged)
-                    elapsed = time.time() - t0
-                    n_gen = len(tokens)
-                    print(f"  \033[2m({n_gen} tokens, {elapsed:.2f}s, "
-                          f"{n_gen/max(elapsed,0.001):.0f} tok/s)\033[0m")
-            elif cmd == "/config":
-                print(f"  Mode:        {mode}")
-                print(f"  Temperature: {temperature}")
-                print(f"  Top-K:       {top_k}")
-                print(f"  Top-P:       {top_p}")
-                print(f"  Max tokens:  {max_tokens}")
-                print(f"  Rep penalty: {rep_penalty}")
-                print(f"  Tagged:      {tagged}")
-                print(f"  Window:      {window_size}")
-                print(f"  Passes:      {num_passes}")
-                print(f"  Device:      {device}")
-                print(f"  Checkpoint:  {ckpt_path}")
-                print(f"  Passages:    {len(stored_passages)}")
-            else:
-                print(f"  Unknown command: {cmd}. Type /help for commands.")
-            continue
-
-        # Text generation
-        if tagged:
-            prompt_text = tag_text(user_input, domain="social")
-        else:
-            prompt_text = user_input
-
-        prompt_ids = [BOS_ID] + tokenize(prompt_text)
-
-        use_mem = (mode == "qa" and mem_keys is not None)
-
-        print(f"\033[1;33mbot>\033[0m ", end='', flush=True)
-        t0 = time.time()
-        tokens = generate_autoregressive(
-            model, cfg, prompt_ids, device,
-            max_new_tokens=max_tokens, temperature=temperature,
-            top_k=top_k, top_p=top_p, repetition_penalty=rep_penalty,
-            mem_keys=mem_keys if use_mem else None,
-            mem_vals=mem_vals if use_mem else None,
-            mem_mask=mem_mask if use_mem else None,
-            use_sliding=(mode == "sliding"),
-            window_size=window_size, num_passes=num_passes,
-            stream=True, strip_output_tags=tagged)
-        elapsed = time.time() - t0
-        n_gen = len(tokens)
-        print(f"  \033[2m({n_gen} tokens, {elapsed:.2f}s, "
-              f"{n_gen/max(elapsed,0.001):.0f} tok/s)\033[0m")
+    canvas.run()
 
 
 if __name__ == "__main__":
