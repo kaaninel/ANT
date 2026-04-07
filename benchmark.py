@@ -111,6 +111,99 @@ def bench_memory_encode(model, device, passage_len, batch_size, warmup, iters):
     return tps
 
 
+def bench_training_step(model, device, batch_size, warmup, iters,
+                        window_size=16, num_passes=4):
+    """Full multitask training step: LM forward + memory encode + sliding window + backward."""
+    import torch.nn.functional as F
+    from train_micro import (
+        generate_shell_texts, load_wikipedia_sentences,
+        TextLMDataset, tag_text
+    )
+    from torch.utils.data import DataLoader
+
+    pad = VOCAB["<pad>"]
+    bos = VOCAB["<bos>"]
+    ans_marker = VOCAB["<ans>"]
+
+    train_model = LoopedLatentController(ModelConfig(), use_checkpoint=False).to(device)
+    train_model.cfg.vocab_size = VOCAB_SIZE
+    optimizer = torch.optim.AdamW(train_model.parameters(), lr=1e-4, weight_decay=0.1)
+
+    examples = generate_dataset(200, seed=42, tagged=True, include_conflicts=True)
+    qa_data = []
+    for ex in examples:
+        p_ids = tokenize(ex.passage)[:256]
+        q_ids = tokenize(ex.question)
+        a_ids = tokenize(ex.answer)
+        full_seq = [bos, ans_marker] + q_ids + a_ids
+        inp = full_seq[:-1]
+        n_ctx = 2 + len(q_ids)
+        tgt = [pad] * (n_ctx - 1) + a_ids
+        while len(p_ids) < 256:
+            p_ids.append(pad)
+        qa_data.append((inp, tgt, p_ids))
+
+    shell_texts = generate_shell_texts(200, seed=42)
+    wiki_texts = load_wikipedia_sentences(200, seed=42)
+    shell_texts = [tag_text(t, dataplane="shell") for t in shell_texts]
+    wiki_texts = [tag_text(t, dataplane="wiki") for t in wiki_texts]
+    cfg = ModelConfig()
+    lm_ds = TextLMDataset(shell_texts + wiki_texts, max_len=cfg.max_seq_len)
+    lm_loader = DataLoader(lm_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    lm_iter = iter(lm_loader)
+
+    import random
+
+    def fn():
+        nonlocal lm_iter
+        train_model.train()
+        try:
+            lm_inp, lm_tgt = next(lm_iter)
+        except StopIteration:
+            lm_iter = iter(lm_loader)
+            lm_inp, lm_tgt = next(lm_iter)
+        lm_inp, lm_tgt = lm_inp.to(device), lm_tgt.to(device)
+
+        batch_idx = random.sample(range(len(qa_data)), batch_size)
+        batch = [qa_data[j] for j in batch_idx]
+        max_seq = max(len(b[0]) for b in batch)
+        inp_b = [b[0] + [pad] * (max_seq - len(b[0])) for b in batch]
+        tgt_b = [b[1] + [pad] * (max_seq - len(b[1])) for b in batch]
+        p_b = [b[2] for b in batch]
+        q_t = torch.tensor(inp_b, dtype=torch.long, device=device)
+        tgt_t = torch.tensor(tgt_b, dtype=torch.long, device=device)
+        p_t = torch.tensor(p_b, dtype=torch.long, device=device)
+
+        lm_logits, _ = train_model(token_ids=lm_inp)
+        lm_loss = F.cross_entropy(
+            lm_logits.reshape(-1, VOCAB_SIZE), lm_tgt.reshape(-1), ignore_index=pad
+        )
+
+        train_model.eval()
+        with torch.no_grad():
+            mk, mv, mm = encode_sentence_frozen(train_model, p_t, device)
+        train_model.train()
+
+        qa_hidden = sliding_lm_encode(
+            train_model, q_t, window_size, num_passes,
+            mem_keys=mk, mem_vals=mv, mem_mask=mm,
+        )
+        qa_logits = F.linear(qa_hidden, train_model.embed.weight)
+        qa_loss = F.cross_entropy(
+            qa_logits.reshape(-1, VOCAB_SIZE), tgt_t.reshape(-1), ignore_index=pad
+        )
+        total_loss = 0.5 * lm_loss + 0.5 * qa_loss
+
+        optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(train_model.parameters(), 1.0)
+        optimizer.step()
+
+    times = timer(fn, warmup, iters)
+    steps_per_sec = [1.0 / t for t in times]
+    return steps_per_sec
+
+
 def bench_qa_inference(model, device, batch_size, warmup, iters, window_size=16, num_passes=4):
     """Full QA pipeline: encode passage → sliding window decode."""
     pad = VOCAB["<pad>"]
@@ -304,6 +397,23 @@ def main():
     enc_times = timer(enc_one, W, I)
     med_enc = statistics.median(enc_times) * 1000
     print(f"  Memory encode (128 tokens):  {med_enc:>6.1f} ms")
+
+    # ── 6. Training Step Throughput ──
+    print("─" * 78)
+    print("  6. Training Step (multitask: LM + QA with memory)")
+    print("     Full forward + backward + optimizer step")
+    print("─" * 78)
+    for bs in [16, 32]:
+        for w, p in [(16, 4), (8, 2), (5, 2)]:
+            sps = bench_training_step(model, device, bs, min(W, 3), min(I, 10),
+                                      window_size=w, num_passes=p)
+            med = statistics.median(sps)
+            p10 = sorted(sps)[len(sps) // 10]
+            p90 = sorted(sps)[len(sps) * 9 // 10]
+            print(f"  B={bs:>2}  W={w:>2} P={p}  "
+                  f"{med:>5.2f} steps/s  "
+                  f"(p10={p10:.2f}, p90={p90:.2f})  "
+                  f"~{med*bs*30:.0f} tok/s")
 
     print()
     print("=" * 78)
