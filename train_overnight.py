@@ -15,6 +15,11 @@ import sys
 import time
 import torch
 
+# Force line-buffered output so tee shows lines immediately
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+print("  ANT overnight script starting...", flush=True)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # OVERNIGHT CONFIG — edit these before running
 # ──────────────────────────────────────────────────────────────────────────────
