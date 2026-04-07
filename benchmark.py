@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Performance benchmarks for LatentController (828K param looping transformer).
+"""Performance benchmarks for ANT (828K param Addressable Neural Transformer).
 
 Measures tokens/second for:
   1. LM forward (causal, no memory) — batch 1 and 16
@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 
 from config import ModelConfig
-from model import LoopedLatentController
+from model import ANT
 from train_micro import (
     VOCAB, VOCAB_SIZE, tokenize, detokenize,
     encode_sentence_frozen, sliding_lm_encode,
@@ -125,7 +125,7 @@ def bench_training_step(model, device, batch_size, warmup, iters,
     bos = VOCAB["<bos>"]
     ans_marker = VOCAB["<ans>"]
 
-    train_model = LoopedLatentController(ModelConfig(), use_checkpoint=False).to(device)
+    train_model = ANT(ModelConfig(), use_checkpoint=False).to(device)
     train_model.cfg.vocab_size = VOCAB_SIZE
     optimizer = torch.optim.AdamW(train_model.parameters(), lr=1e-4, weight_decay=0.1)
 
@@ -262,7 +262,7 @@ def print_result(label, tps_list, batch_size):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LatentController Performance Benchmarks")
+    parser = argparse.ArgumentParser(description="ANT Performance Benchmarks")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
@@ -279,13 +279,13 @@ def main():
 
     cfg = ModelConfig()
     cfg.vocab_size = VOCAB_SIZE
-    model = LoopedLatentController(cfg, use_checkpoint=False).to(device)
+    model = ANT(cfg, use_checkpoint=False).to(device)
     model.eval()
 
     n_params = sum(p.numel() for p in model.parameters())
 
     print("=" * 78)
-    print("  LatentController Performance Benchmark")
+    print("  ANT Performance Benchmark")
     print("=" * 78)
     print(f"  Model:   {n_params:,} params ({n_params/1e6:.2f}M)")
     print(f"  Device:  {device}")

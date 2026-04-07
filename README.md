@@ -1,6 +1,8 @@
-# LatentController
+# ANT — Addressable Neural Transformer
 
 An 828K parameter looping transformer with persistent external memory and cross-attention memory retrieval. Pure 256-byte vocabulary — token ID equals raw byte value.
+
+**ANT** stands for **Addressable Neural Transformer** — the defining trait is that memory slots are written and retrieved via learned 3-head × 8-dim addresses, enabling content-addressed persistent storage separate from the context window.
 
 ## Quick Start
 
@@ -12,6 +14,9 @@ python train_micro.py --chunk_size 16
 
 # Multi-task training: LM (shell+wiki) + QA (bAbI) (~25 min)
 python train_micro.py --chunk_size 16 --multitask
+
+# Interactive chat
+python chat.py
 ```
 
 ## Architecture
@@ -42,8 +47,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture diagr
 train_micro.py    Self-contained training pipeline (~3000 lines)
                   Tokenizer, datasets, encoders, training loops, evaluation
 config.py         ModelConfig (828K) + MemoryConfig
-model.py          LoopedLatentController, TransformerBlock, Attention, MemoryAttention
+model.py          ANT, TransformerBlock, Attention, MemoryAttention
+model_mlx.py      ANTMLX — Apple Silicon optimized inference
 memory.py         MemorySystem — trie-indexed persistent int8 vector store
+chat.py           Interactive terminal chat CLI
+benchmark.py      Inference + training performance benchmarks
+train_colab.ipynb A100 GPU training notebook (Hugging Face Hub integration)
 ```
 
 ## Key Design Decisions
@@ -52,7 +61,7 @@ memory.py         MemorySystem — trie-indexed persistent int8 vector store
 - **Cross-attention memory**: Each block has a dedicated memory cross-attention layer (not prepended to sequence). Enables clean separation of context window and memory.
 - **Sliding window encoding**: Input processed in overlapping chunks. Each chunk produces memory vectors (mean + last hidden state) tagged with temporal embeddings.
 - **Trie-indexed storage**: 3 address heads × 8 dimensions. Addresses learned end-to-end. Neighbor search (±1) enables implicit concept clustering.
-- **Multi-task training**: Causal LM on shell commands + Wikipedia text, interleaved with sliding-window QA on bAbI. Different forward paths for speed (1.2 it/s on MPS).
+- **Multi-task training**: Causal LM on shell commands + Wikipedia markdown, interleaved with sliding-window QA on bAbI. Different forward paths for speed (1.2 it/s on MPS).
 
 ## Training Curriculum
 

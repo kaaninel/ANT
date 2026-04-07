@@ -1,8 +1,8 @@
-# Copilot Instructions — LatentController
+# Copilot Instructions — ANT (Addressable Neural Transformer)
 
 ## What This Is
 
-An 828K parameter looping transformer with persistent external memory. Research prototype — not a standard ML training repo. The entire training pipeline (tokenizer, datasets, encoders, training loops, evaluation) lives in a single file (`train_micro.py`, ~3000 lines).
+ANT is an 828K parameter looping transformer with persistent external memory. Research prototype — not a standard ML training repo. The entire training pipeline (tokenizer, datasets, encoders, training loops, evaluation) lives in a single file (`train_micro.py`, ~3000 lines).
 
 ## Running
 
@@ -20,7 +20,7 @@ python train_micro.py --chunk_size 16 --multitask
 python train_micro.py --eval_only
 
 # Quick smoke test — verify imports and forward pass
-python -c "from config import ModelConfig; from model import LoopedLatentController; import torch; m = LoopedLatentController(ModelConfig()); print(sum(p.numel() for p in m.parameters()))"
+python -c "from config import ModelConfig; from model import ANT; import torch; m = ANT(ModelConfig()); print(sum(p.numel() for p in m.parameters()))"
 ```
 
 There are no linters, formatters, or test suites configured.
@@ -29,7 +29,7 @@ There are no linters, formatters, or test suites configured.
 
 ```
 config.py          ModelConfig (828K) + MemoryConfig
-model.py           LoopedLatentController — the transformer itself
+model.py           ANT — the transformer itself (Addressable Neural Transformer)
 memory.py          TrieIndex persistent memory system (int8 vectors on disk)
 train_micro.py     Everything else: tokenizer, data gen, encoders, training, eval
 ```
@@ -80,7 +80,7 @@ QA training uses a staged curriculum (D1→D2). Skipping stages or changing rati
 
 ### Config is the single source of truth for model dimensions
 
-`ModelConfig` in `config.py` controls everything: d_model, n_heads, vocab_size, special token IDs, memory parameters, and chunk encoding settings. `model.py` reads all dimensions from the config object passed to `LoopedLatentController.__init__`. Don't hardcode dimensions.
+`ModelConfig` in `config.py` controls everything: d_model, n_heads, vocab_size, special token IDs, memory parameters, and chunk encoding settings. `model.py` reads all dimensions from the config object passed to `ANT.__init__`. Don't hardcode dimensions.
 
 ### Experiment results to preserve
 

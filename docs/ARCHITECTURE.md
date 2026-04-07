@@ -1,4 +1,4 @@
-# Architecture — LatentController (828K params)
+# Architecture — ANT: Addressable Neural Transformer (828K params)
 
 ## Overview
 
@@ -8,7 +8,7 @@ into memory, and retrieves stored information through learned address heads.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         LatentController (828,306 params)                    │
+│                    ANT — Addressable Neural Transformer (828,306 params)       │
 │                                                                             │
 │  Vocabulary: 256 (raw bytes, no tokenizer)                                  │
 │  Embedding:  256 × 128 = 32,768 params                                     │

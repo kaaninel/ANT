@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LatentController — Interactive Chat CLI
+ANT (Addressable Neural Transformer) — Interactive Chat CLI
 
 Loads a trained checkpoint and provides an interactive terminal interface
 for testing the model with autoregressive byte-level generation.
@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 
 from config import ModelConfig, MemoryConfig
-from model import LoopedLatentController, StaticKVCache
+from model import ANT, StaticKVCache
 
 # Import training utilities for tokenization and encoding
 from train_micro import (
@@ -53,7 +53,7 @@ def load_model(checkpoint_path: str, device: str):
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
 
-    model = LoopedLatentController(cfg, use_checkpoint=False).to(device)
+    model = ANT(cfg, use_checkpoint=False).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
@@ -237,7 +237,7 @@ def encode_passage_to_memory(model, passage_text, device, tagged=False):
 
 HELP_TEXT = """
 ╔══════════════════════════════════════════════════════════════╗
-║                  LatentController Chat CLI                   ║
+║                       ANT Chat CLI                           ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Commands:                                                   ║
 ║    /help          - Show this help                           ║
@@ -263,7 +263,7 @@ HELP_TEXT = """
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LatentController Chat CLI")
+    parser = argparse.ArgumentParser(description="ANT Chat CLI")
     parser.add_argument("--checkpoint", default=None,
                         help="Path to model checkpoint (.pt)")
     parser.add_argument("--device", default=None,
@@ -305,7 +305,7 @@ def main():
             sys.exit(1)
 
     print("=" * 62)
-    print("  LatentController — Interactive Chat CLI")
+    print("  ANT — Interactive Chat CLI")
     print("=" * 62)
 
     model, cfg, ckpt = load_model(ckpt_path, device)

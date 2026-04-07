@@ -1,4 +1,4 @@
-"""MLX port of LoopedLatentController — optimised for autoregressive generation.
+"""MLX port of ANT (Addressable Neural Transformer) — optimised for autoregressive generation.
 
 Apple Silicon unified-memory, lazy evaluation, and fused kernels
 eliminate the per-step dispatch overhead that bottlenecks PyTorch/MPS.
@@ -243,7 +243,7 @@ class TransformerBlock(nn.Module):
 # Main Model
 # ---------------------------------------------------------------------------
 
-class LoopedLatentControllerMLX(nn.Module):
+class ANTMLX(nn.Module):
     def __init__(self, cfg: ModelConfig, window_size: int = 0):
         super().__init__()
         self.cfg = cfg
@@ -445,7 +445,7 @@ def convert_torch_to_mlx(torch_model) -> dict:
 
 def load_from_torch(torch_model, cfg: ModelConfig, window_size: int = 0):
     """Create MLX model and load weights from a PyTorch model."""
-    mlx_model = LoopedLatentControllerMLX(cfg, window_size=window_size)
+    mlx_model = ANTMLX(cfg, window_size=window_size)
     weights = convert_torch_to_mlx(torch_model)
 
     # Load weights into MLX model
@@ -476,12 +476,12 @@ def load_from_torch(torch_model, cfg: ModelConfig, window_size: int = 0):
 def load_from_checkpoint(path: str, cfg: ModelConfig, window_size: int = 0):
     """Load MLX model from a PyTorch checkpoint file."""
     import torch
-    from model import LoopedLatentController
+    from model import ANT
 
     ckpt = torch.load(path, map_location='cpu', weights_only=False)
     sd = ckpt['model'] if 'model' in ckpt else ckpt
 
-    torch_model = LoopedLatentController(cfg, use_checkpoint=False)
+    torch_model = ANT(cfg, use_checkpoint=False)
     torch_model.load_state_dict(sd, strict=False)
 
     return load_from_torch(torch_model, cfg, window_size=window_size)

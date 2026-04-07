@@ -390,7 +390,8 @@ class TransformerBlock(nn.Module):
 # Main Model
 # ---------------------------------------------------------------------------
 
-class LoopedLatentController(nn.Module):
+class ANT(nn.Module):
+    """Addressable Neural Transformer — 828K param looping transformer with external memory."""
     def __init__(self, cfg: ModelConfig, use_checkpoint: bool = True):
         super().__init__()
         self.cfg = cfg

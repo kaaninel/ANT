@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LatentController — 828K param looping transformer with persistent memory.
+ANT — Addressable Neural Transformer (828K params) with persistent memory.
 
 Self-contained training pipeline: tokenizer, datasets, encoders, training, evaluation.
 Achieves 99.5% QA accuracy on bAbI memory tasks while simultaneously learning LM.
@@ -28,7 +28,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from config import ModelConfig, MemoryConfig
-from model import LoopedLatentController
+from model import ANT
 from memory import MemorySystem
 
 
@@ -1753,7 +1753,7 @@ def sliding_lm_encode(model, input_ids, window_size=5, num_passes=4,
     to access any passage information, solving the receptive field problem.
 
     Args:
-        model: LoopedLatentController (with cross-attention layers)
+        model: ANT (with cross-attention layers)
         input_ids: (B, T) token IDs
         window_size: odd integer, size of sliding window
         num_passes: number of diffusion-like refinement passes
@@ -2859,7 +2859,7 @@ def main():
     print(f"  Device:     {device}")
     print(f"  Vocab:      {VOCAB_SIZE} tokens (byte-level UTF-8)")
 
-    model = LoopedLatentController(cfg, use_checkpoint=False).to(device)
+    model = ANT(cfg, use_checkpoint=False).to(device)
     n_params = count_params(model)
     log_model_summary(model, cfg)
 
