@@ -8,6 +8,41 @@ from config import ModelConfig
 
 
 # ---------------------------------------------------------------------------
+# Static KV Cache — pre-allocated, no torch.cat per step
+# ---------------------------------------------------------------------------
+
+class StaticKVCache:
+    """Pre-allocated KV cache that writes in-place instead of torch.cat.
+
+    Usage:
+        cache = StaticKVCache(n_layers, batch, n_heads, max_seq, head_dim, device)
+        # Prefill: writes positions 0..T-1
+        logits, halt, cache = model(prompt, kv_cache=cache, cache_position=0)
+        # Decode: writes position T, T+1, ...
+        logits, halt, cache = model(tok, kv_cache=cache, cache_position=T)
+    """
+    __slots__ = ('k', 'v', 'pos')
+
+    def __init__(self, n_layers: int, batch: int, n_heads: int,
+                 max_seq: int, head_dim: int, device, dtype=None):
+        if dtype is None:
+            dtype = torch.float32
+        shape = (n_layers, batch, n_heads, max_seq, head_dim)
+        self.k = torch.zeros(shape, device=device, dtype=dtype)
+        self.v = torch.zeros(shape, device=device, dtype=dtype)
+        self.pos = 0
+
+    def write(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor, pos: int, n: int):
+        """Write k,v at positions [pos, pos+n) for given layer."""
+        self.k[layer_idx, :, :, pos:pos + n, :] = k
+        self.v[layer_idx, :, :, pos:pos + n, :] = v
+
+    def read(self, layer_idx: int, end_pos: int):
+        """Read k,v for positions [0, end_pos) for given layer."""
+        return self.k[layer_idx, :, :, :end_pos, :], self.v[layer_idx, :, :, :end_pos, :]
+
+
+# ---------------------------------------------------------------------------
 # RMSNorm
 # ---------------------------------------------------------------------------
 
@@ -84,10 +119,12 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        mask: torch.Tensor,
+        mask,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        kv_cache: tuple | None = None,
+        kv_cache=None,
+        _layer_idx: int = -1,
+        _cache_position: int = -1,
     ) -> tuple:
         B, T, _ = x.shape
         H, D = self.n_heads, self.head_dim
@@ -100,23 +137,34 @@ class Attention(nn.Module):
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
 
-        # KV-cache: append new K,V to cached K,V
-        if kv_cache is not None:
+        # KV-cache handling
+        if isinstance(kv_cache, StaticKVCache):
+            pos = _cache_position
+            kv_cache.write(_layer_idx, k, v, pos, T)
+            k, v = kv_cache.read(_layer_idx, pos + T)
+            new_cache = kv_cache
+        elif kv_cache is not None:
             cached_k, cached_v = kv_cache
             k = torch.cat([cached_k, k], dim=2)
             v = torch.cat([cached_v, v], dim=2)
-        new_cache = (k, v)
+            new_cache = (k, v)
+        else:
+            # No prior cache (prefill or training) — still return K/V for
+            # list-based caching to populate on first call
+            new_cache = (k, v)
 
-        # Use PyTorch's fused SDPA (dispatches to Flash Attention when available).
-        # Pass the additive float mask (0 = attend, -1e9 = block) directly.
-        attn_mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T_q, T_kv)
-
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            is_causal=False,  # we provide our own asymmetric mask
-        )
+        # mask=None: no masking (incremental decode)
+        # mask="causal": is_causal=True (prefill)
+        # Otherwise: additive mask
+        if mask is None:
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        elif isinstance(mask, str) and mask == "causal":
+            out = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=0.0, is_causal=True)
+        else:
+            attn_mask = mask.unsqueeze(0).unsqueeze(0)
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, dropout_p=0.0)
 
         out = out.transpose(1, 2).reshape(B, T, H * D)
         return self.o(out), new_cache
@@ -315,15 +363,19 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        mask: torch.Tensor,
+        mask,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        kv_cache: tuple | None = None,
+        kv_cache=None,
         mem_keys: torch.Tensor | None = None,
         mem_values: torch.Tensor | None = None,
         mem_mask: torch.Tensor | None = None,
+        _layer_idx: int = -1,
+        _cache_position: int = -1,
     ) -> tuple:
-        attn_out, new_cache = self.attn(self.norm1(x), mask, cos, sin, kv_cache)
+        attn_out, new_cache = self.attn(
+            self.norm1(x), mask, cos, sin, kv_cache,
+            _layer_idx=_layer_idx, _cache_position=_cache_position)
         x = x + self.drop(attn_out)
 
         if self.use_mem_attn and mem_keys is not None:
@@ -392,6 +444,19 @@ class LoopedLatentController(nn.Module):
             torch.full((n_text_max2, n_text_max2), neg_inf), diagonal=1
         )
         self.register_buffer("mem_text_mask", mem_text)
+
+    def make_cache(self, batch_size: int, max_seq: int = 0,
+                   device=None, dtype=None) -> StaticKVCache:
+        """Create a pre-allocated static KV cache for generation."""
+        if max_seq == 0:
+            max_seq = self.cfg.max_seq_len
+        if device is None:
+            device = self.embed.weight.device
+        if dtype is None:
+            dtype = self.embed.weight.dtype
+        return StaticKVCache(
+            self.cfg.n_layers, batch_size, self.cfg.n_heads,
+            max_seq, self.cfg.head_dim, device, dtype)
 
     # ------------------------------------------------------------------
     # Memory-only forward (for split KV-cache)
@@ -490,49 +555,57 @@ class LoopedLatentController(nn.Module):
         T_new = x.shape[1]  # tokens being processed this call
 
         # Determine if this is a prefill (first call, populating cache) or incremental
+        use_static = isinstance(kv_cache, StaticKVCache)
         is_prefill = kv_cache is not None and cache_position == 0
         is_incremental = kv_cache is not None and cache_position > 0
 
         if is_incremental:
             cos = self.rope_cos[cache_position:cache_position + T_new]
             sin = self.rope_sin[cache_position:cache_position + T_new]
-            T_total = cache_position + T_new
-            mask = torch.zeros(T_new, T_total, device=device)
-            for i in range(T_new):
-                pos = cache_position + i
-                mask[i, pos + 1:] = -1e9
+            mask = None
         else:
             cos = self.rope_cos[:T_new]
             sin = self.rope_sin[:T_new]
             if bidirectional:
-                # Full attention: all tokens see all others (for encoding)
                 mask = torch.zeros(T_new, T_new, device=device)
             elif n_mem == 0:
-                mask = self.text_only_mask[:T_text, :T_text]
+                mask = "causal"
             else:
                 mask = self.mem_text_mask[:T_new, :T_new]
 
-        new_kv_cache = []
-        for i, layer in enumerate(self.layers):
-            layer_cache = kv_cache[i] if kv_cache is not None and i < len(kv_cache) else None
-            if self.use_checkpoint and self.training:
-                x, _ = checkpoint(layer, x, mask, cos, sin, None,
-                                  cross_keys, cross_vals, cross_mask,
-                                  use_reentrant=False)
-                new_kv_cache.append(None)
-            else:
-                x, layer_kv = layer(x, mask, cos, sin, kv_cache=layer_cache,
-                                    mem_keys=cross_keys, mem_values=cross_vals,
-                                    mem_mask=cross_mask)
-                new_kv_cache.append(layer_kv)
+        if use_static:
+            for i, layer in enumerate(self.layers):
+                if self.use_checkpoint and self.training:
+                    x, _ = checkpoint(layer, x, mask, cos, sin, None,
+                                      cross_keys, cross_vals, cross_mask,
+                                      use_reentrant=False)
+                else:
+                    x, _ = layer(x, mask, cos, sin, kv_cache=kv_cache,
+                                 mem_keys=cross_keys, mem_values=cross_vals,
+                                 mem_mask=cross_mask,
+                                 _layer_idx=i, _cache_position=cache_position)
+            kv_cache.pos = cache_position + T_new
+            new_kv_cache = kv_cache
+        else:
+            new_kv_cache = []
+            for i, layer in enumerate(self.layers):
+                layer_cache = kv_cache[i] if kv_cache is not None and i < len(kv_cache) else None
+                if self.use_checkpoint and self.training:
+                    x, _ = checkpoint(layer, x, mask, cos, sin, None,
+                                      cross_keys, cross_vals, cross_mask,
+                                      use_reentrant=False)
+                    new_kv_cache.append(None)
+                else:
+                    x, layer_kv = layer(x, mask, cos, sin, kv_cache=layer_cache,
+                                        mem_keys=cross_keys, mem_values=cross_vals,
+                                        mem_mask=cross_mask)
+                    new_kv_cache.append(layer_kv)
 
         hidden = self.norm(x)
 
-        # Text positions only (n_mem=0 in cross-attention mode)
-        text_hidden = hidden[:, n_mem:, :]              # (B, T_text, d_model)
-
+        text_hidden = hidden[:, n_mem:, :]
         logits = F.linear(text_hidden, self.embed.weight)
-        halt_logits = self.halt_head(text_hidden)       # (B, T_text, 2)
+        halt_logits = self.halt_head(text_hidden)
 
         if kv_cache is not None:
             if return_hidden:
