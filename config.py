@@ -1,10 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
 class ModelConfig:
     """
-    828K parameter looping transformer with persistent external memory.
+    ANT — ~892K parameter byte-level transformer with persistent hierarchical memory.
 
     Pure 256-byte vocabulary (token ID = raw byte value).
     Special tokens mapped to ASCII control characters:
@@ -20,11 +20,6 @@ class ModelConfig:
     max_seq_len: int = 192
     dropout: float = 0.0
     rope_theta: float = 10000.0
-    n_mem_slots: int = 9
-    n_mem_positions: int = 11
-    n_text_positions: int = 181       # max_seq_len - n_mem_positions
-    n_addr_heads: int = 3
-    addr_dim: int = 8
     pad_id: int = 0x00                # NUL
     eos_id: int = 0x03                # ETX
     bos_id: int = 0x02                # STX
@@ -35,20 +30,28 @@ class ModelConfig:
     # Cross-attention memory
     use_memory_cross_attention: bool = True
     memory_topk: int = 0              # 0=softmax, >0=top-k sparse attention
-    memory_hops: int = 1              # 1=standard, 2=multi-hop
-    # Streaming chunk encoding
-    chunk_size: int = 8
-    slots_per_chunk: int = 2
-    max_temporal_chunks: int = 32
+    # AddrNet: 3 separate co-processors generating hierarchical addresses
+    n_addr_nets: int = 3              # number of address paths
+    addr_hidden_dim: int = 16         # internal hidden dim of each AddrNet
+    addr_n_bins: int = 256            # bins per trie level
+    addr_depth: int = 8               # max address depth (hard cap)
+    # Tag system: persistent context register
+    use_tag_system: bool = True
+    # Memory cross-attention slot count (3 paths × (depth+1) levels)
+    n_mem_slots: int = 25             # 3 × 9 - 2 shared roots = ~25
 
 
 @dataclass
 class MemoryConfig:
-    alpha_base: float = 0.1
-    max_write_count: int = 65535
-    write_count_decay_cap: int = 1000
-    write_count_decay_rate: float = 0.01
-    neighbor_k: int = 2
-    coarse_dims: int = 4
-    fine_dims: int = 4
-    n_mem_slots: int = 9
+    """Hierarchical trie memory with float32 mmap storage."""
+    data_path: str = "data_cache/memory"
+    ema_alpha_base: float = 0.1       # base EMA momentum for leaf writes
+    ema_alpha_min: float = 0.001      # minimum EMA alpha
+    depth_cap: int = 8                # hard cap on address depth
+    coarse_depth: int = 2             # depth 0..coarse_depth kept in RAM
+    n_addr_nets: int = 3              # must match ModelConfig.n_addr_nets
+    d_model: int = 128                # vector dimensionality
+    n_bins: int = 256                 # bins per trie level
+    page_size: int = 16384            # OS page size (16KB on M4)
+    flush_interval: int = 1000        # flush dirty pages every N writes
+

@@ -1096,6 +1096,46 @@ def write_memory_batch(model, hidden, memory, positions=None):
     return n_writes
 
 
+def write_encoder_to_memory(model, values, mask, memory):
+    """Write encoder output values to persistent TrieIndex.
+
+    Called after every encoding step — this is how knowledge enters memory.
+    values: (B, S, d_model) — encoder hidden states
+    mask: (B, S) bool — valid slots
+    """
+    B, S, D = values.shape
+    n_writes = 0
+    with torch.no_grad():
+        for s in range(S):
+            h_batch = values[:, s, :].detach()
+            valid = mask[:, s]
+            if not valid.any():
+                continue
+            vecs_np = h_batch.float().cpu().numpy()
+            addr_list = model.compute_addresses_batch(h_batch)
+            addr_cpu = [h.cpu().numpy() for h in addr_list]
+            for b in range(B):
+                if not valid[b]:
+                    continue
+                ab = [addr_cpu[h][b].tobytes() for h in range(len(addr_list))]
+                memory.write_memory(ab, vecs_np[b])
+                n_writes += 1
+    return n_writes
+
+
+@torch.no_grad()
+def read_memory_to_kv(model, query_hidden, memory, device):
+    """Read from persistent TrieIndex and return cross-attention tensors.
+
+    Called before every forward pass — this is how knowledge is recalled.
+    query_hidden: (B, d_model) — address computation query
+    Returns: (keys, values, mask) for cross-attention
+    """
+    trie_vecs = batch_read_memory(model, query_hidden, memory, device)
+    trie_mask = (trie_vecs.abs().sum(-1) > 1e-6)
+    return trie_vecs, trie_vecs, trie_mask
+
+
 def count_params(model):
     return sum(p.numel() for p in model.parameters())
 
@@ -3568,6 +3608,14 @@ def train_chat(model, cfg, device, output_dir,
     chat_ds = ChatMemoryDataset(chat_texts)
     print(f"    LM dataset:   {len(lm_ds)} samples")
     print(f"    Chat dataset: {len(chat_ds)} samples")
+
+    # Persistent memory — THE knowledge store (not optional)
+    mem_cfg = MemoryConfig()
+    memory_dir = os.path.join(output_dir, "memory")
+    memory = MemorySystem(memory_dir, mem_cfg, record_size=cfg.d_model)
+    if memory.total_entries() > 0:
+        memory.rebuild_index(model, device)
+    print(f"    TrieIndex:    {memory.total_entries()} entries at {memory_dir}")
 
     # Optimizer with weight decay
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1)

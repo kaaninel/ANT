@@ -101,6 +101,55 @@ class SiLUFFN(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# AddrNet — Small co-processor for hierarchical address generation
+# ---------------------------------------------------------------------------
+
+class AddrNet(nn.Module):
+    """Generates a variable-depth hierarchical address from a hidden state.
+
+    Runs `depth` internal clock cycles. Each cycle:
+      1. Project current state → logits over n_bins
+      2. Pick bin (argmax in forward, Gumbel-softmax for training)
+      3. Condition on choice via residual + nonlinearity
+
+    Output: list of `depth` bin indices forming a trie path.
+    """
+    def __init__(self, d_model: int = 128, hidden_dim: int = 16,
+                 n_bins: int = 256, depth: int = 8):
+        super().__init__()
+        self.depth = depth
+        self.n_bins = n_bins
+        self.proj_in = nn.Linear(d_model, hidden_dim)
+        self.bin_embed = nn.Embedding(n_bins, hidden_dim)
+        self.mlp = nn.Linear(hidden_dim, hidden_dim)
+        self.out = nn.Linear(hidden_dim, n_bins)
+
+    def forward(self, hidden_state: torch.Tensor, temperature: float = 1.0):
+        """
+        hidden_state: (B, d_model) or (d_model,)
+        Returns: (B, depth) int64 tensor of bin indices
+        """
+        if hidden_state.dim() == 1:
+            hidden_state = hidden_state.unsqueeze(0)
+        B = hidden_state.shape[0]
+        h = self.proj_in(hidden_state)          # (B, hidden_dim)
+        bins = []
+        for _ in range(self.depth):
+            logits = self.out(h)                # (B, n_bins)
+            if self.training and temperature > 0:
+                # Gumbel-softmax for differentiable training
+                soft = F.gumbel_softmax(logits, tau=temperature, hard=True)
+                bin_idx = soft.argmax(dim=-1)   # (B,)
+                h = h + (soft @ self.bin_embed.weight)  # differentiable embed
+            else:
+                bin_idx = logits.argmax(dim=-1) # (B,)
+                h = h + self.bin_embed(bin_idx) # (B, hidden_dim)
+            h = F.silu(self.mlp(h))
+            bins.append(bin_idx)
+        return torch.stack(bins, dim=1)         # (B, depth)
+
+
+# ---------------------------------------------------------------------------
 # Attention
 # ---------------------------------------------------------------------------
 
@@ -255,106 +304,31 @@ class MemoryAttention(nn.Module):
         return self.o(out)
 
 
-class MultiHopMemoryAttention(nn.Module):
-    """Two-hop cross-attention: entity identification → attribute retrieval.
-
-    Hop 1 reads memory with the raw decoder query to find the relevant entity.
-    Hop 2 reads memory with a query conditioned on hop 1's output, retrieving
-    the entity's attribute (e.g. location). This decomposes "who?" from
-    "what about them?" which single-hop attention conflates.
-
-    Shared K/V projections (same memory view), separate Q projections per hop.
-    Only adds one extra Q linear per layer vs standard MemoryAttention.
-    """
-    def __init__(self, d_model: int, n_heads: int, head_dim: int, topk: int = 0):
-        super().__init__()
-        self.n_heads = n_heads
-        self.head_dim = head_dim
-        self.topk = topk
-        inner = n_heads * head_dim
-
-        self.k = nn.Linear(d_model, inner, bias=False)
-        self.v = nn.Linear(d_model, inner, bias=False)
-        self.q1 = nn.Linear(d_model, inner, bias=False)  # entity query
-        self.q2 = nn.Linear(d_model, inner, bias=False)  # attribute query
-        self.o = nn.Linear(inner, d_model, bias=False)
-
-        self.inv_temp = nn.Parameter(torch.ones(n_heads))
-
-    def _attend(self, q, k, v, attn_mask):
-        """Single-hop attention (softmax or top-k)."""
-        H, D = self.n_heads, self.head_dim
-        S = k.shape[-1]
-
-        if self.topk <= 0 or self.topk >= S:
-            return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0)
-
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(D)
-        if attn_mask is not None:
-            scores = scores + attn_mask
-        full_attn = F.softmax(scores, dim=-1)
-        k_clamped = min(self.topk, scores.shape[-1])
-        topk_vals, _ = scores.topk(k_clamped, dim=-1)
-        topk_mask = (scores >= topk_vals[..., -1:]).float()
-        sparse_attn = full_attn * topk_mask
-        sparse_attn = sparse_attn / (sparse_attn.sum(dim=-1, keepdim=True) + 1e-8)
-        attn = full_attn + (sparse_attn - full_attn).detach()
-        return torch.matmul(attn, v)
-
-    def forward(self, x: torch.Tensor, mem_keys: torch.Tensor,
-                mem_values: torch.Tensor,
-                mem_mask: torch.Tensor | None = None) -> torch.Tensor:
-        B, T, _ = x.shape
-        S = mem_keys.shape[1]
-        H, D = self.n_heads, self.head_dim
-
-        k = self.k(mem_keys).view(B, S, H, D).transpose(1, 2)
-        v = self.v(mem_values).view(B, S, H, D).transpose(1, 2)
-
-        attn_mask = None
-        if mem_mask is not None:
-            attn_mask = torch.zeros(B, 1, 1, S, device=x.device, dtype=x.dtype)
-            attn_mask.masked_fill_(~mem_mask.unsqueeze(1).unsqueeze(2), float('-inf'))
-
-        temp = self.inv_temp.view(1, H, 1, 1)
-
-        # Hop 1: entity identification
-        q1 = self.q1(x).view(B, T, H, D).transpose(1, 2) * temp
-        hop1 = self._attend(q1, k, v, attn_mask)
-        hop1 = hop1.transpose(1, 2).reshape(B, T, H * D)  # (B, T, inner)
-
-        # Hop 2: attribute retrieval conditioned on entity context
-        q2 = self.q2(x + hop1).view(B, T, H, D).transpose(1, 2) * temp
-        hop2 = self._attend(q2, k, v, attn_mask)
-        hop2 = hop2.transpose(1, 2).reshape(B, T, H * D)
-
-        return self.o(hop2)
-
-
-
-
-
 # ---------------------------------------------------------------------------
-# Transformer Block
+# Transformer Block (with tag + memory cross-attention)
 # ---------------------------------------------------------------------------
 
 class TransformerBlock(nn.Module):
+    """Layer order: Self-Attention → Tag-Attention → Memory-Attention → FFN."""
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.norm1 = RMSNorm(cfg.d_model)
         self.attn  = Attention(cfg)
 
+        # Tag cross-attention (persistent context register)
+        self.use_tag = getattr(cfg, 'use_tag_system', False)
+        if self.use_tag:
+            self.norm_tag = RMSNorm(cfg.d_model)
+            self.tag_head = nn.Linear(cfg.d_model, cfg.d_model)
+            self.tag_gate = nn.Linear(cfg.d_model, 1)
+
+        # Memory cross-attention (trie-retrieved vectors)
         self.use_mem_attn = getattr(cfg, 'use_memory_cross_attention', False)
         if self.use_mem_attn:
             self.norm_mem = RMSNorm(cfg.d_model)
             topk = getattr(cfg, 'memory_topk', 0)
-            hops = getattr(cfg, 'memory_hops', 1)
-            if hops >= 2:
-                self.mem_attn = MultiHopMemoryAttention(
-                    cfg.d_model, cfg.n_heads, cfg.head_dim, topk=topk)
-            else:
-                self.mem_attn = MemoryAttention(
-                    cfg.d_model, cfg.n_heads, cfg.head_dim, topk=topk)
+            self.mem_attn = MemoryAttention(
+                cfg.d_model, cfg.n_heads, cfg.head_dim, topk=topk)
 
         self.norm2 = RMSNorm(cfg.d_model)
         self.ffn   = SiLUFFN(cfg.d_model, cfg.ffn_dim)
@@ -370,18 +344,30 @@ class TransformerBlock(nn.Module):
         mem_keys: torch.Tensor | None = None,
         mem_values: torch.Tensor | None = None,
         mem_mask: torch.Tensor | None = None,
+        tag_register: torch.Tensor | None = None,
         _layer_idx: int = -1,
         _cache_position: int = -1,
     ) -> tuple:
+        # 1. Self-attention
         attn_out, new_cache = self.attn(
             self.norm1(x), mask, cos, sin, kv_cache,
             _layer_idx=_layer_idx, _cache_position=_cache_position)
         x = x + self.drop(attn_out)
 
+        # 2. Tag cross-attention (GRU-style gated update from tag register)
+        if self.use_tag and tag_register is not None:
+            normed = self.norm_tag(x)
+            new_tag = torch.tanh(self.tag_head(normed))
+            gate = torch.sigmoid(self.tag_gate(normed))
+            tag_context = gate * new_tag + (1 - gate) * tag_register.unsqueeze(1)
+            x = x + self.drop(tag_context)
+
+        # 3. Memory cross-attention (trie-retrieved vectors)
         if self.use_mem_attn and mem_keys is not None:
             x = x + self.drop(self.mem_attn(
                 self.norm_mem(x), mem_keys, mem_values, mem_mask))
 
+        # 4. FFN
         x = x + self.drop(self.ffn(self.norm2(x)))
         return x, new_cache
 
@@ -391,7 +377,7 @@ class TransformerBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 class ANT(nn.Module):
-    """ANT — 828K param looping transformer with persistent external memory."""
+    """ANT — ~892K param byte-level transformer with hierarchical persistent memory."""
     def __init__(self, cfg: ModelConfig, use_checkpoint: bool = True):
         super().__init__()
         self.cfg = cfg
@@ -401,50 +387,34 @@ class ANT(nn.Module):
         self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.d_model)
 
-        # Halt head: bias initialized to [0, 0] (50/50 CONTINUE/HALT)
+        # Halt head for ACT: bias initialized to [0, 0] (50/50 CONTINUE/HALT)
         self.halt_head = nn.Linear(cfg.d_model, 2, bias=True)
         nn.init.constant_(self.halt_head.bias, 0.0)
 
-        # Address heads
-        self.addr_heads = nn.ModuleList([
-            nn.Linear(cfg.d_model, cfg.addr_dim, bias=False)
-            for _ in range(cfg.n_addr_heads)
+        # AddrNets: 3 separate co-processors generating hierarchical addresses
+        n_nets = getattr(cfg, 'n_addr_nets', 3)
+        hidden = getattr(cfg, 'addr_hidden_dim', 16)
+        n_bins = getattr(cfg, 'addr_n_bins', 256)
+        depth = getattr(cfg, 'addr_depth', 8)
+        self.addr_nets = nn.ModuleList([
+            AddrNet(cfg.d_model, hidden, n_bins, depth) for _ in range(n_nets)
         ])
 
-        # Temporal embedding for memory slots (chunk ordering)
-        if getattr(cfg, 'use_memory_cross_attention', False):
-            max_temporal = getattr(cfg, 'max_temporal_chunks', 32)
-            self.temporal_emb = nn.Embedding(max_temporal, cfg.d_model)
+        # V_proj: projects hidden state to stored value format
+        self.v_proj = nn.Linear(cfg.d_model, cfg.d_model)
 
-        # RoPE cache (full context: mem + text — must cover max possible sequence)
-        total_pos = cfg.n_mem_positions + cfg.max_seq_len
-        cos, sin = precompute_rope(cfg.head_dim, total_pos, cfg.rope_theta)
+        # RoPE cache (text positions only — memory is via cross-attention now)
+        cos, sin = precompute_rope(cfg.head_dim, cfg.max_seq_len, cfg.rope_theta)
         self.register_buffer("rope_cos", cos)
         self.register_buffer("rope_sin", sin)
 
-        # Pre-compute attention masks as registered buffers so that
-        # torch.compile / CUDAGraphs can reference them as stable tensors.
+        # Causal mask for text-only self-attention
         neg_inf = -1e9
-
-        # text-only causal mask — used in Phase 1 (no memory)
         n_text_max = cfg.max_seq_len
         text_only = torch.triu(
             torch.full((n_text_max, n_text_max), neg_inf), diagonal=1
         )
         self.register_buffer("text_only_mask", text_only)
-
-        # mem+text asymmetric mask — used in Phases 3/4
-        n_mem_max  = cfg.n_mem_positions    # 11  (<MEM> + slots + </MEM>)
-        n_text_max2 = cfg.max_seq_len       # 512 (absolute max text length)
-        T_max = n_mem_max + n_text_max2     # 523
-        mem_text = torch.zeros(T_max, T_max)
-        # Memory rows: block all text columns
-        mem_text[:n_mem_max, n_mem_max:] = neg_inf
-        # Text rows: causal over text
-        mem_text[n_mem_max:, n_mem_max:] = torch.triu(
-            torch.full((n_text_max2, n_text_max2), neg_inf), diagonal=1
-        )
-        self.register_buffer("mem_text_mask", mem_text)
 
     def make_cache(self, batch_size: int, max_seq: int = 0,
                    device=None, dtype=None) -> StaticKVCache:
@@ -460,43 +430,24 @@ class ANT(nn.Module):
             max_seq, self.cfg.head_dim, device, dtype)
 
     # ------------------------------------------------------------------
-    # Memory-only forward (for split KV-cache)
+    # Address computation (via AddrNets)
     # ------------------------------------------------------------------
 
-    @torch.no_grad()
-    def forward_memory(self, memory_vectors: torch.Tensor) -> list:
+    def compute_addresses(self, hidden_state: torch.Tensor, temperature: float = 1.0):
         """
-        Process memory positions through all layers independently.
-
-        Since memory rows cannot attend to text (masked), the K,V computed
-        here are identical to those in a joint [mem+text] forward pass.
-
-        memory_vectors : (B, n_mem_slots, d_model) — float tensor
-        Returns list of (k, v) per layer, each k,v shape (B, H, n_mem_pos, D).
+        hidden_state : (d_model,) or (B, d_model)
+        Returns list of N_addr_nets tensors, each (B, depth) int64.
         """
-        B = memory_vectors.shape[0]
-        device = memory_vectors.device
+        if hidden_state.dim() == 1:
+            hidden_state = hidden_state.unsqueeze(0)
+        return [net(hidden_state, temperature) for net in self.addr_nets]
 
-        mem_start = self.embed(
-            torch.full((B, 1), self.cfg.mem_start_id, dtype=torch.long, device=device)
-        )
-        mem_end = self.embed(
-            torch.full((B, 1), self.cfg.mem_end_id, dtype=torch.long, device=device)
-        )
-        x = torch.cat([mem_start, memory_vectors, mem_end], dim=1)  # (B, n_mem, d)
-
-        n_mem = x.shape[1]
-        # Memory-only block of the asymmetric mask (all-to-all, no text)
-        mask = self.mem_text_mask[:n_mem, :n_mem]
-        cos = self.rope_cos[:n_mem]
-        sin = self.rope_sin[:n_mem]
-
-        mem_kvs = []
-        for layer in self.layers:
-            x, layer_kv = layer(x, mask, cos, sin)
-            mem_kvs.append(layer_kv)
-
-        return mem_kvs
+    def compute_value(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        """Project hidden state to memory value format.
+        hidden_state: (B, d_model) or (d_model,)
+        Returns: same shape as input.
+        """
+        return self.v_proj(hidden_state)
 
     # ------------------------------------------------------------------
     # Forward
@@ -505,10 +456,10 @@ class ANT(nn.Module):
     def forward(
         self,
         token_ids: torch.Tensor,
-        memory_vectors: torch.Tensor | None = None,
         memory_keys: torch.Tensor | None = None,
         memory_values: torch.Tensor | None = None,
         memory_mask: torch.Tensor | None = None,
+        tag_register: torch.Tensor | None = None,
         return_hidden: bool = False,
         kv_cache: list | None = None,
         cache_position: int = 0,
@@ -516,48 +467,29 @@ class ANT(nn.Module):
     ):
         """
         token_ids      : (B, T_text)
-        memory_vectors : (B, n_mem, d_model) float — raw embeddings (legacy)
-        memory_keys    : (B, n_mem, inner) — pre-computed keys from write heads
-        memory_values  : (B, n_mem, inner) — pre-computed values from write heads
-        memory_mask    : (B, n_mem) bool — True for valid memory slots
-        kv_cache       : list of (k, v) tuples per layer, or None
+        memory_keys    : (B, S, d_model) — trie-retrieved vectors used as keys
+        memory_values  : (B, S, d_model) — trie-retrieved vectors used as values
+        memory_mask    : (B, S) bool — True for valid memory slots
+        tag_register   : (B, d_model) — persistent tag context vector
+        kv_cache       : StaticKVCache or list of (k,v) tuples, or None
         cache_position : position offset for RoPE when using KV-cache
-        bidirectional  : if True, use full (non-causal) self-attention mask.
-                         Use during memory encoding so all tokens see each other.
+        bidirectional  : if True, use full (non-causal) self-attention mask
         Returns (logits, halt_logits[, hidden][, new_kv_cache]).
-        When kv_cache is not None, returns new_kv_cache as last element.
-        logits cover text positions only.
         """
         B, T_text = token_ids.shape
         device = token_ids.device
-        use_cross_attn = getattr(self.cfg, 'use_memory_cross_attention', False)
 
         x = self.embed(token_ids)   # (B, T_text, d_model)
 
-        # Memory handling: cross-attention mode vs prepend mode
-        n_mem = 0
-        cross_keys = None
-        cross_vals = None
-        cross_mask = memory_mask  # (B, S) bool or None
-        if use_cross_attn:
-            if memory_keys is not None and memory_values is not None:
-                cross_keys, cross_vals = memory_keys, memory_values
-        elif memory_vectors is not None:
-                # Legacy prepend: [<MEM> mem1..N </MEM> text]
-                n_mem = memory_vectors.shape[1] + 2
-                mem_start = self.embed(
-                    torch.full((B, 1), self.cfg.mem_start_id, dtype=torch.long, device=device)
-                )
-                mem_end = self.embed(
-                    torch.full((B, 1), self.cfg.mem_end_id, dtype=torch.long, device=device)
-                )
-                x = torch.cat([mem_start, memory_vectors, mem_end, x], dim=1)
+        # Cross-attention memory from trie
+        cross_keys = memory_keys
+        cross_vals = memory_values
+        cross_mask = memory_mask
 
-        T_new = x.shape[1]  # tokens being processed this call
+        T_new = x.shape[1]
 
-        # Determine if this is a prefill (first call, populating cache) or incremental
+        # Determine if this is prefill or incremental
         use_static = isinstance(kv_cache, StaticKVCache)
-        is_prefill = kv_cache is not None and cache_position == 0
         is_incremental = kv_cache is not None and cache_position > 0
 
         if is_incremental:
@@ -569,21 +501,21 @@ class ANT(nn.Module):
             sin = self.rope_sin[:T_new]
             if bidirectional:
                 mask = torch.zeros(T_new, T_new, device=device)
-            elif n_mem == 0:
-                mask = "causal"
             else:
-                mask = self.mem_text_mask[:T_new, :T_new]
+                mask = "causal"
 
         if use_static:
             for i, layer in enumerate(self.layers):
                 if self.use_checkpoint and self.training:
                     x, _ = checkpoint(layer, x, mask, cos, sin, None,
                                       cross_keys, cross_vals, cross_mask,
+                                      tag_register,
                                       use_reentrant=False)
                 else:
                     x, _ = layer(x, mask, cos, sin, kv_cache=kv_cache,
                                  mem_keys=cross_keys, mem_values=cross_vals,
                                  mem_mask=cross_mask,
+                                 tag_register=tag_register,
                                  _layer_idx=i, _cache_position=cache_position)
             kv_cache.pos = cache_position + T_new
             new_kv_cache = kv_cache
@@ -594,19 +526,19 @@ class ANT(nn.Module):
                 if self.use_checkpoint and self.training:
                     x, _ = checkpoint(layer, x, mask, cos, sin, None,
                                       cross_keys, cross_vals, cross_mask,
+                                      tag_register,
                                       use_reentrant=False)
                     new_kv_cache.append(None)
                 else:
                     x, layer_kv = layer(x, mask, cos, sin, kv_cache=layer_cache,
                                         mem_keys=cross_keys, mem_values=cross_vals,
-                                        mem_mask=cross_mask)
+                                        mem_mask=cross_mask,
+                                        tag_register=tag_register)
                     new_kv_cache.append(layer_kv)
 
         hidden = self.norm(x)
-
-        text_hidden = hidden[:, n_mem:, :]
-        logits = F.linear(text_hidden, self.embed.weight)
-        halt_logits = self.halt_head(text_hidden)
+        logits = F.linear(hidden, self.embed.weight)
+        halt_logits = self.halt_head(hidden)
 
         if kv_cache is not None:
             if return_hidden:
@@ -615,37 +547,3 @@ class ANT(nn.Module):
         if return_hidden:
             return logits, halt_logits, hidden
         return logits, halt_logits
-
-    # ------------------------------------------------------------------
-    # Address computation
-    # ------------------------------------------------------------------
-
-    def compute_addresses(self, hidden_state: torch.Tensor):
-        """
-        hidden_state : (d_model,) or (1, d_model)
-        Returns list of 3 int8 tensors each of shape (addr_dim,).
-        """
-        if hidden_state.dim() == 2:
-            hidden_state = hidden_state.squeeze(0)
-        addresses = []
-        for head in self.addr_heads:
-            raw = head(hidden_state)                    # (addr_dim,)
-            # Scale to int8 range
-            scale = raw.abs().max().clamp(min=1e-6)
-            addr = (raw / scale * 127.0).round().clamp(-128, 127).to(torch.int8)
-            addresses.append(addr)
-        return addresses
-
-def compute_addresses_batch(self, hidden_states: torch.Tensor):
-        """
-        Vectorized address computation for a batch.
-        hidden_states : (B, d_model)
-        Returns list of 3 int8 tensors each of shape (B, addr_dim).
-        """
-        addresses = []
-        for head in self.addr_heads:
-            raw = head(hidden_states)                   # (B, addr_dim)
-            scale = raw.abs().amax(dim=-1, keepdim=True).clamp(min=1e-6)
-            addr = (raw / scale * 127.0).round().clamp(-128, 127).to(torch.int8)
-            addresses.append(addr)
-        return addresses

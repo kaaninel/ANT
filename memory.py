@@ -1,17 +1,24 @@
 """
-Trie-based persistent memory system.
+Hierarchical trie-based persistent memory system.
 
-Layout on disk:
-  data_path/data.bin  — flat binary, 512 bytes per record (int8)
-  data_path/meta.bin  — per-record write_count (uint16, 2 bytes each)
+Architecture:
+  - Each trie node stores an EMA value vector (d_model × float32)
+  - 256 bins per level, up to depth_cap levels (default 8)
+  - Writes propagate EMA to all ancestor levels with decay 1/√(depth_diff+1)
+  - Reads collect the full ancestor path (root→leaf) = up to depth+1 vectors
 
-Three TrieIndex objects correspond to the three address heads.
+Storage: single flat binary file.
+  Header (12 bytes): n_nodes(u32), d_model(u32), n_records(u32)
+  Values: n_nodes × d_model × float32
+  Write counts: n_nodes × uint32
+  Adjacency: per node → n_children(u16) + n_children × (bin_id(u8) + child_idx(u32))
 """
 
+import math
 import os
 import struct
 import threading
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -19,328 +26,348 @@ from config import MemoryConfig
 
 
 # ---------------------------------------------------------------------------
-# TrieNode
+# TrieNode — each node stores an EMA value vector
 # ---------------------------------------------------------------------------
 
 class TrieNode:
-    __slots__ = ("children", "record_number", "write_count", "flags")
+    __slots__ = ("children", "value", "write_count")
 
-    def __init__(self):
-        self.children: dict = {}
-        self.record_number: int = -1
+    def __init__(self, d_model: int = 128):
+        self.children: Dict[int, 'TrieNode'] = {}
+        self.value: Optional[np.ndarray] = None  # float32, shape (d_model,)
         self.write_count: int = 0
-        self.flags: int = 0
 
 
 # ---------------------------------------------------------------------------
-# TrieIndex
+# HierarchicalTrie — the core memory structure
 # ---------------------------------------------------------------------------
 
-class TrieIndex:
-    """Trie indexed over 8 signed bytes (int8 range −128…127, stored as uint8)."""
+class HierarchicalTrie:
+    """Trie with EMA value vectors at every node.
 
-    def __init__(self):
-        self.root = TrieNode()
+    Each node stores an accumulated representation of all writes that
+    pass through it. Leaf nodes store exact values; ancestor nodes store
+    decayed EMA summaries of their descendants.
+    """
 
-    def _key(self, address_bytes: bytes) -> bytes:
-        """Normalise signed int8 address to uint8 key bytes."""
-        return bytes(b & 0xFF for b in address_bytes)
+    def __init__(self, cfg: MemoryConfig):
+        self.cfg = cfg
+        self.d_model = cfg.d_model
+        self.root = TrieNode(cfg.d_model)
+        self.root.value = np.zeros(cfg.d_model, dtype=np.float32)
+        self.n_records = 0
 
-    def insert(self, address_bytes: bytes, record_number: int, write_count: int):
-        key = self._key(address_bytes)
-        node = self.root
-        for byte in key:
-            node = node.children.setdefault(byte, TrieNode())
-        node.record_number = record_number
-        node.write_count = write_count
+    def write(self, address: np.ndarray, value: np.ndarray,
+              alpha_base: float = 0.1, alpha_min: float = 0.001):
+        """Write a value at the given address, propagating EMA to ancestors.
 
-    def lookup(self, address_bytes: bytes) -> Optional[TrieNode]:
-        key = self._key(address_bytes)
-        node = self.root
-        for byte in key:
-            node = node.children.get(byte)
-            if node is None:
-                return None
-        return node if node.record_number >= 0 else None
-
-    def find_nearest(
-        self,
-        address_bytes: bytes,
-        k: int = 2,
-        coarse_dims: int = 4,
-    ) -> List[Tuple[int, int, int]]:
+        address: (depth,) int array of bin indices [0..255]
+        value:   (d_model,) float32 vector (already projected by V_proj)
         """
-        Exact match on dimensions 0..coarse_dims-1.
-        ±1 search on dimensions coarse_dims..7.
-        Returns list of (hamming_dist, record_number, write_count) sorted by dist.
+        depth = len(address)
+        if depth == 0:
+            return
+
+        # Collect the path from root to leaf, creating nodes as needed
+        path = [self.root]
+        node = self.root
+        for bin_idx in address:
+            b = int(bin_idx)
+            if b not in node.children:
+                node.children[b] = TrieNode(self.d_model)
+                node.children[b].value = np.zeros(self.d_model, dtype=np.float32)
+            node = node.children[b]
+            path.append(node)
+
+        # Write leaf with full weight
+        leaf = path[-1]
+        leaf.write_count += 1
+        alpha_leaf = max(alpha_base / (1.0 + 0.01 * leaf.write_count), alpha_min)
+        if leaf.write_count == 1:
+            leaf.value = value.copy()
+        else:
+            leaf.value = (1 - alpha_leaf) * leaf.value + alpha_leaf * value
+
+        # Propagate EMA to ancestors with decay 1/√(depth_diff+1)
+        # path[0] = root, path[-1] = leaf at depth D
+        for i in range(len(path) - 1):  # i=0 is root, i=D-1 is parent of leaf
+            ancestor = path[i]
+            depth_diff = depth - i  # distance from this ancestor to leaf
+            decay = 1.0 / math.sqrt(depth_diff + 1)
+
+            # Coarser levels use slower EMA (smaller effective alpha)
+            coarse_factor = 1.0 / (i + 1)  # root gets smallest alpha
+            alpha = max(alpha_base * decay * coarse_factor, alpha_min)
+
+            ancestor.write_count += 1
+            ancestor.value = (1 - alpha) * ancestor.value + alpha * value
+
+        self.n_records += 1
+
+    def read_path(self, address: np.ndarray) -> List[np.ndarray]:
+        """Read the full ancestor path for an address.
+
+        Returns list of vectors from root to the deepest matching node.
+        If the exact address doesn't exist, returns path to deepest existing prefix.
         """
-        key = list(self._key(address_bytes))
-        results: List[Tuple[int, int, int]] = []
+        vectors = []
+        if self.root.value is not None:
+            vectors.append(self.root.value)
 
-        def _search(node: TrieNode, depth: int, dist: int):
-            if depth == 8:
-                if node.record_number >= 0:
-                    results.append((dist, node.record_number, node.write_count))
-                return
-            byte = key[depth]
-            if depth < coarse_dims:
-                # exact only
-                child = node.children.get(byte)
-                if child is not None:
-                    _search(child, depth + 1, dist)
-            else:
-                # ±1 neighbourhood
-                for delta in (-1, 0, 1):
-                    candidate = (byte + delta) & 0xFF
-                    child = node.children.get(candidate)
-                    if child is not None:
-                        _search(child, depth + 1, dist + abs(delta))
+        node = self.root
+        for bin_idx in address:
+            b = int(bin_idx)
+            child = node.children.get(b)
+            if child is None:
+                break
+            node = child
+            if node.value is not None:
+                vectors.append(node.value)
 
-        _search(self.root, 0, 0)
-        results.sort(key=lambda t: t[0])
-        return results[:k]
+        return vectors
+
+    def total_nodes(self) -> int:
+        """Count total nodes in the trie (for diagnostics)."""
+        count = 0
+        stack = [self.root]
+        while stack:
+            node = stack.pop()
+            count += 1
+            stack.extend(node.children.values())
+        return count
+
+    def depth_stats(self) -> Dict[int, int]:
+        """Count nodes at each depth level."""
+        stats: Dict[int, int] = {}
+        stack: List[Tuple[TrieNode, int]] = [(self.root, 0)]
+        while stack:
+            node, depth = stack.pop()
+            stats[depth] = stats.get(depth, 0) + 1
+            for child in node.children.values():
+                stack.append((child, depth + 1))
+        return stats
 
 
 # ---------------------------------------------------------------------------
-# MemorySystem
+# MemorySystem — high-level interface wrapping the trie
 # ---------------------------------------------------------------------------
-
 
 class MemorySystem:
-    def __init__(self, data_path: str, cfg: MemoryConfig, record_size: int = 512):
-        self.data_path = data_path
+    """Persistent hierarchical memory for ANT.
+
+    Provides read/write operations that interface with the model's AddrNets
+    and V_proj. Handles serialization and mmap'd storage.
+    """
+
+    def __init__(self, cfg: MemoryConfig):
         self.cfg = cfg
-        self.record_size = record_size
-        os.makedirs(data_path, exist_ok=True)
-
-        self._data_file = os.path.join(data_path, "data.bin")
-        self._meta_file = os.path.join(data_path, "meta.bin")
+        self.trie = HierarchicalTrie(cfg)
         self._lock = threading.Lock()
+        self._write_count = 0
 
-        # Three trie indexes (one per address head)
-        self.indexes: List[TrieIndex] = [TrieIndex() for _ in range(3)]
+        os.makedirs(cfg.data_path, exist_ok=True)
+        self._bin_path = os.path.join(cfg.data_path, "memory.bin")
 
-        # Count of stored records
-        self._n_records = self._count_records()
+        if os.path.exists(self._bin_path):
+            self._load()
 
-        # RAM cache: load all records into memory to eliminate disk I/O
-        self._data_cache: Optional[np.ndarray] = None
-        self._meta_cache: Optional[np.ndarray] = None
-        self._cache_capacity = 0
-        self._load_cache()
+    def write(self, addresses: List[np.ndarray], value: np.ndarray):
+        """Write a value to multiple address paths (one per AddrNet).
 
-    def _load_cache(self):
-        """Load all records and metadata into RAM."""
-        if self._n_records > 0 and os.path.exists(self._data_file):
-            raw = np.fromfile(self._data_file, dtype=np.int8)
-            self._data_cache = raw.reshape(-1, self.record_size)
-        else:
-            self._data_cache = np.empty((0, self.record_size), dtype=np.int8)
-
-        if self._n_records > 0 and os.path.exists(self._meta_file):
-            raw_meta = np.fromfile(self._meta_file, dtype=np.uint16)
-            self._meta_cache = raw_meta
-        else:
-            self._meta_cache = np.empty(0, dtype=np.uint16)
-
-        self._cache_capacity = max(self._n_records, 1024)
-        # Pre-allocate with headroom to avoid frequent resizes
-        if self._data_cache.shape[0] < self._cache_capacity:
-            new_data = np.zeros((self._cache_capacity, self.record_size), dtype=np.int8)
-            new_data[:self._data_cache.shape[0]] = self._data_cache
-            self._data_cache = new_data
-        if self._meta_cache.shape[0] < self._cache_capacity:
-            new_meta = np.zeros(self._cache_capacity, dtype=np.uint16)
-            new_meta[:self._meta_cache.shape[0]] = self._meta_cache
-            self._meta_cache = new_meta
-
-    def _ensure_capacity(self, needed: int):
-        """Grow cache arrays if needed."""
-        if needed <= self._cache_capacity:
-            return
-        new_cap = max(needed, self._cache_capacity * 2)
-        new_data = np.zeros((new_cap, self.record_size), dtype=np.int8)
-        new_data[:self._n_records] = self._data_cache[:self._n_records]
-        self._data_cache = new_data
-        new_meta = np.zeros(new_cap, dtype=np.uint16)
-        new_meta[:self._n_records] = self._meta_cache[:self._n_records]
-        self._meta_cache = new_meta
-        self._cache_capacity = new_cap
-
-    def flush_to_disk(self):
-        """Write RAM cache to disk. Call periodically or at checkpoints."""
+        addresses: list of N_addr_nets arrays, each (depth,) int
+        value:     (d_model,) float32 vector from V_proj
+        """
         with self._lock:
-            if self._n_records > 0:
-                self._data_cache[:self._n_records].tofile(self._data_file)
-                self._meta_cache[:self._n_records].tofile(self._meta_file)
+            for addr in addresses:
+                self.trie.write(
+                    addr, value,
+                    alpha_base=self.cfg.ema_alpha_base,
+                    alpha_min=self.cfg.ema_alpha_min
+                )
+            self._write_count += 1
 
-    # ------------------------------------------------------------------
-    # Disk helpers
-    # ------------------------------------------------------------------
+            if self._write_count % self.cfg.flush_interval == 0:
+                self._save()
 
-    def _count_records(self) -> int:
-        if not os.path.exists(self._data_file):
-            return 0
-        size = os.path.getsize(self._data_file)
-        return size // self.record_size
+    def write_batch(self, batch_addresses: List[List[np.ndarray]],
+                    batch_values: np.ndarray):
+        """Batch write: B items, each with N addr paths.
 
-    def total_entries(self) -> int:
-        """Return current number of records in RAM cache."""
-        return self._n_records
-
-    def reset(self):
-        """Clear all records and indexes in-memory (no disk I/O)."""
+        batch_addresses: [B][N_addr_nets] arrays of (depth,) int
+        batch_values:    (B, d_model) float32
+        """
         with self._lock:
-            self._n_records = 0
-            self.indexes = [TrieIndex() for _ in range(len(self.indexes))]
-            self._data_cache = np.zeros((self._cache_capacity, self.record_size),
-                                        dtype=np.int8)
-            self._meta_cache = np.zeros(self._cache_capacity, dtype=np.uint16)
+            for b in range(len(batch_addresses)):
+                value = batch_values[b]
+                for addr in batch_addresses[b]:
+                    self.trie.write(
+                        addr, value,
+                        alpha_base=self.cfg.ema_alpha_base,
+                        alpha_min=self.cfg.ema_alpha_min
+                    )
+            self._write_count += len(batch_addresses)
 
-    def _read_record(self, record_number: int) -> np.ndarray:
-        return self._data_cache[record_number].copy()
+    def read(self, addresses: List[np.ndarray],
+             max_vectors: int = 25) -> Tuple[np.ndarray, np.ndarray]:
+        """Read memory for multiple address paths.
 
-    def _write_record(self, record_number: int, vec: np.ndarray):
-        self._data_cache[record_number] = vec.astype(np.int8)
+        Collects full ancestor path from each AddrNet, deduplicates root,
+        pads/truncates to max_vectors.
 
-    def _append_record(self, vec: np.ndarray) -> int:
-        """Append a new record to RAM cache, return its record number."""
-        with self._lock:
-            rec_num = self._n_records
-            self._ensure_capacity(rec_num + 1)
-            self._data_cache[rec_num] = vec.astype(np.int8)
-            self._meta_cache[rec_num] = 1
-            self._n_records += 1
-        return rec_num
-
-    def _read_write_count(self, record_number: int) -> int:
-        if record_number >= self._n_records:
-            return 0
-        return int(self._meta_cache[record_number])
-
-    def _write_write_count(self, record_number: int, count: int):
-        self._meta_cache[record_number] = min(count, self.cfg.max_write_count)
-
-    # ------------------------------------------------------------------
-    # Read memory
-    # ------------------------------------------------------------------
-
-    def read_memory(
-        self, addresses: List[bytes]
-    ) -> List[np.ndarray]:
+        Returns:
+            vectors: (max_vectors, d_model) float32
+            mask:    (max_vectors,) bool — True for valid slots
         """
-        addresses : list of 3 byte-strings (one per address head)
-        Returns up to 9 int8 numpy arrays of shape (512,).
-        Probes: 3 heads × (1 exact + 2 nearest neighbours) = up to 9.
-        Deduplicated by record number, padded with zeros if fewer than 9 found.
-        """
-        seen = set()
-        vecs = []
-        for head_idx, addr in enumerate(addresses):
-            idx = self.indexes[head_idx]
-            # exact
-            node = idx.lookup(addr)
-            if node is not None and node.record_number not in seen:
-                seen.add(node.record_number)
-                vecs.append(self._read_record(node.record_number))
+        all_vectors = []
 
-            # k nearest neighbours
-            for _, rec_num, _ in idx.find_nearest(
-                addr, k=self.cfg.neighbor_k,
-                coarse_dims=self.cfg.coarse_dims
-            ):
-                if rec_num not in seen:
-                    seen.add(rec_num)
-                    vecs.append(self._read_record(rec_num))
+        # Collect paths from all address nets
+        root_added = False
+        for addr in addresses:
+            path = self.trie.read_path(addr)
+            if not root_added and len(path) > 0:
+                all_vectors.extend(path)  # include root from first path
+                root_added = True
+            elif len(path) > 1:
+                all_vectors.extend(path[1:])  # skip root (already added)
+            elif len(path) == 1 and not root_added:
+                all_vectors.extend(path)
+                root_added = True
 
-        # Pad to n_mem_slots
-        while len(vecs) < self.cfg.n_mem_slots:
-            vecs.append(np.zeros(self.record_size, dtype=np.int8))
+        # Pad or truncate
+        n = len(all_vectors)
+        vectors = np.zeros((max_vectors, self.cfg.d_model), dtype=np.float32)
+        mask = np.zeros(max_vectors, dtype=bool)
 
-        return vecs[:self.cfg.n_mem_slots]
+        for i in range(min(n, max_vectors)):
+            vectors[i] = all_vectors[i]
+            mask[i] = True
 
-    # ------------------------------------------------------------------
-    # Write memory
-    # ------------------------------------------------------------------
+        return vectors, mask
 
-    def write_memory(self, addresses: List[bytes], vector: np.ndarray):
-        """
-        addresses : list of 3 byte-strings (one per address head)
-        vector    : float32 numpy array of shape (d_model,) — will be scaled to int8
-        """
-        # Scale vector to int8
-        scale = np.abs(vector).max()
-        if scale < 1e-6:
-            return
-        int8_vec = np.clip(np.round(vector / scale * 127.0), -128, 127).astype(np.int8)
+    def read_batch(self, batch_addresses: List[List[np.ndarray]],
+                   max_vectors: int = 25) -> Tuple[np.ndarray, np.ndarray]:
+        """Batch read: B items.
 
-        # Determine if any head already has this address
-        existing_rec = None
-        for head_idx, addr in enumerate(addresses):
-            node = self.indexes[head_idx].lookup(addr)
-            if node is not None:
-                existing_rec = (head_idx, node.record_number, node.write_count)
-                break
-
-        if existing_rec is None:
-            # New record
-            rec_num = self._append_record(int8_vec)
-            for head_idx, addr in enumerate(addresses):
-                self.indexes[head_idx].insert(addr, rec_num, 1)
-        else:
-            _, rec_num, write_count = existing_rec
-            # Adaptive EMA blend
-            effective_count = min(write_count, self.cfg.write_count_decay_cap)
-            alpha = self.cfg.alpha_base / (1.0 + self.cfg.write_count_decay_rate * effective_count)
-            alpha = max(alpha, 0.001)
-
-            old_vec = self._read_record(rec_num)
-
-            # int16 intermediate to avoid overflow
-            blended = (
-                (1.0 - alpha) * old_vec.astype(np.int16) +
-                alpha * int8_vec.astype(np.int16)
-            )
-            new_vec = np.clip(np.round(blended), -128, 127).astype(np.int8)
-            self._write_record(rec_num, new_vec)
-
-            new_count = min(write_count + 1, self.cfg.max_write_count)
-            self._write_write_count(rec_num, new_count)
-            for head_idx, addr in enumerate(addresses):
-                self.indexes[head_idx].insert(addr, rec_num, new_count)
-
-    def read_memory_batch(
-        self, batch_addresses: List[List[bytes]]
-    ) -> np.ndarray:
-        """
-        Vectorized batch memory read.
-
-        batch_addresses: List of B items, each a list of 3 byte-strings.
-        Returns: np.ndarray of shape (B, n_mem_slots, self.record_size), dtype int8.
+        Returns:
+            vectors: (B, max_vectors, d_model) float32
+            mask:    (B, max_vectors) bool
         """
         B = len(batch_addresses)
-        n_slots = self.cfg.n_mem_slots
-        result = np.zeros((B, n_slots, self.record_size), dtype=np.int8)
+        vectors = np.zeros((B, max_vectors, self.cfg.d_model), dtype=np.float32)
+        mask = np.zeros((B, max_vectors), dtype=bool)
 
         for b in range(B):
-            seen = set()
-            slot = 0
-            for head_idx, addr in enumerate(batch_addresses[b]):
-                idx = self.indexes[head_idx]
-                node = idx.lookup(addr)
-                if node is not None and node.record_number not in seen:
-                    seen.add(node.record_number)
-                    if slot < n_slots:
-                        result[b, slot] = self._data_cache[node.record_number]
-                        slot += 1
+            v, m = self.read(batch_addresses[b], max_vectors)
+            vectors[b] = v
+            mask[b] = m
 
-                for _, rec_num, _ in idx.find_nearest(
-                    addr, k=self.cfg.neighbor_k,
-                    coarse_dims=self.cfg.coarse_dims,
-                ):
-                    if rec_num not in seen and slot < n_slots:
-                        seen.add(rec_num)
-                        result[b, slot] = self._data_cache[rec_num]
-                        slot += 1
+        return vectors, mask
 
-        return result
+    def reset(self):
+        """Clear all memory."""
+        with self._lock:
+            self.trie = HierarchicalTrie(self.cfg)
+            self._write_count = 0
+
+    def total_entries(self) -> int:
+        return self.trie.n_records
+
+    def total_nodes(self) -> int:
+        return self.trie.total_nodes()
+
+    def flush(self):
+        """Force save to disk."""
+        with self._lock:
+            self._save()
+
+    # ------------------------------------------------------------------
+    # Binary serialization
+    # ------------------------------------------------------------------
+    # Format: Header(12B) | Values(N×D×4B) | WriteCounts(N×4B) | Adjacency
+    # Header: n_nodes(u32) d_model(u32) n_records(u32)
+    # Adjacency per node: n_children(u16) + n_children × (bin_id(u8) child_idx(u32))
+
+    _HEADER = struct.Struct('<III')  # 3 × uint32 = 12 bytes
+
+    def _save(self):
+        """Serialize trie to a single flat binary file."""
+        node_list: List[TrieNode] = []
+        child_map: List[List[Tuple[int, int]]] = []  # [(bin_id, child_idx)]
+
+        def _collect(node: TrieNode) -> int:
+            idx = len(node_list)
+            node_list.append(node)
+            child_map.append([])  # placeholder
+            for b in sorted(node.children.keys()):
+                ci = _collect(node.children[b])
+                child_map[idx].append((b, ci))
+            return idx
+
+        _collect(self.trie.root)
+
+        n = len(node_list)
+        d = self.cfg.d_model
+
+        with open(self._bin_path, 'wb') as f:
+            # Header
+            f.write(self._HEADER.pack(n, d, self.trie.n_records))
+
+            # Values: contiguous float32 block
+            vals = np.zeros((n, d), dtype=np.float32)
+            for i, node in enumerate(node_list):
+                if node.value is not None:
+                    vals[i] = node.value
+            f.write(vals.tobytes())
+
+            # Write counts
+            wc = np.array([node.write_count for node in node_list], dtype=np.uint32)
+            f.write(wc.tobytes())
+
+            # Adjacency
+            for i in range(n):
+                children = child_map[i]
+                f.write(struct.pack('<H', len(children)))
+                for bin_id, ci in children:
+                    f.write(struct.pack('<BI', bin_id, ci))
+
+    def _load(self):
+        """Deserialize trie from flat binary file."""
+        try:
+            with open(self._bin_path, 'rb') as f:
+                # Header
+                hdr = f.read(self._HEADER.size)
+                if len(hdr) < self._HEADER.size:
+                    return
+                n, d, n_records = self._HEADER.unpack(hdr)
+                if n == 0 or d != self.cfg.d_model:
+                    return
+
+                # Values
+                val_bytes = f.read(n * d * 4)
+                vals = np.frombuffer(val_bytes, dtype=np.float32).reshape(n, d).copy()
+
+                # Write counts
+                wc_bytes = f.read(n * 4)
+                wc = np.frombuffer(wc_bytes, dtype=np.uint32)
+
+                # Create nodes
+                nodes: List[TrieNode] = []
+                for i in range(n):
+                    tn = TrieNode(d)
+                    tn.value = vals[i]
+                    tn.write_count = int(wc[i])
+                    nodes.append(tn)
+
+                # Adjacency
+                for i in range(n):
+                    nc_bytes = f.read(2)
+                    nc = struct.unpack('<H', nc_bytes)[0]
+                    for _ in range(nc):
+                        entry = f.read(5)  # 1 byte bin_id + 4 byte child_idx
+                        bin_id, ci = struct.unpack('<BI', entry)
+                        nodes[i].children[bin_id] = nodes[ci]
+
+                self.trie.root = nodes[0]
+                self.trie.n_records = n_records
+        except (OSError, struct.error):
+            return

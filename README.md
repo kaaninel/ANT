@@ -1,42 +1,54 @@
 # 🐜 ANT
 
-> **828,306 parameters. Persistent memory. Unlimited context. Pure bytes.**
+> **937K parameters. Zero knowledge in weights. All knowledge in memory.**
 
-ANT is an experimental language model that fits under 1 million parameters while supporting unlimited input/output through a causal sliding window and persistent external memory accessed via cross-attention. Every byte is a token — no tokenizer, no vocabulary limits, no subword artifacts.
+ANT is a byte-level transformer where the model weights learn **how** to read
+and write — but store no knowledge themselves. All facts, context, and learned
+information live in a persistent hierarchical trie memory. The result: unlimited
+context, persistent recall across sessions, and a model that can grow its
+knowledge without growing its parameters.
 
 ```
-  ┌─────────────────────────────────────────────────────┐
-  │                    🐜 ANT                            │
-  │                                                     │
-  │    828K params · 4 layers · 128-dim · byte-level    │
-  │                                                     │
-  │    Input ──► Sliding Window ──► Memory Write         │
-  │                                    │                 │
-  │    Query ──► Cross-Attention ◄─────┘                 │
-  │                  │                                   │
-  │                  ▼                                   │
-  │              Response (unlimited length)              │
-  └─────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────┐
+  │                         🐜 ANT                            │
+  │                                                          │
+  │    937K params · 4 layers · 128-dim · byte-level         │
+  │    Weights = computation only. Trie = all knowledge.     │
+  │                                                          │
+  │    Token ──► Transformer ──► Hidden ──► Trie WRITE       │
+  │                   ▲                                      │
+  │                   └──── Trie READ (25 vectors)           │
+  │                   │                                      │
+  │                   ▼                                      │
+  │              Next byte prediction (unlimited output)     │
+  └──────────────────────────────────────────────────────────┘
 ```
 
-## Why ANT?
+## How It Works
 
-Most small language models are crippled by fixed context windows — they forget everything outside their last ~200 tokens. ANT solves this with **persistent external memory**: information is encoded into memory slots via a sliding window, then retrieved via cross-attention during generation. The model's context window is tiny (8 bytes), but memory cross-attention has **no distance limit**.
+The model processes raw bytes through a sliding window transformer. At every
+token, 3 learned **AddrNet** co-processors generate hierarchical addresses
+into a 256-ary trie. The trie is read (up to 25 ancestor vectors via
+cross-attention) and written (EMA-blended value vectors at every level).
+
+Without memory, ANT outputs random bytes. With memory, it recalls facts,
+answers questions, and holds conversations.
 
 | Feature | ANT | Typical Small LM |
 |---------|-----|-------------------|
-| Parameters | 828K | 1M–10M |
-| Context | Unlimited (sliding window + memory) | Fixed (512–2048 tokens) |
-| Tokenizer | None (raw bytes) | BPE/SentencePiece |
-| Memory | Persistent cross-attention | None |
-| QA Accuracy | 100% (bAbI 1/2/3-fact) | N/A |
+| Parameters | 937K | 1M–10M |
+| Knowledge storage | External trie (unlimited) | Model weights (fixed) |
+| Context | Unlimited (trie has no distance limit) | Fixed (512–2048 tokens) |
+| Tokenizer | None (raw bytes, vocab=256) | BPE/SentencePiece |
+| Persistence | Trie survives restart | Weights only |
+| QA Accuracy | 100% (bAbI 1/2/3-fact) | N/A at this size |
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
 
-# Train (overnight, M4/MPS)
+# Train (M4/MPS overnight)
 PYTHONUNBUFFERED=1 python3 train_overnight.py 2>&1 | tee training.log
 
 # Train (A100 GPU, Colab)
@@ -49,121 +61,99 @@ python3 chat.py --checkpoint checkpoints/overnight/checkpoint_best.pt
 ## Architecture
 
 ```
-828K params │ 4 layers │ d_model=128 │ 4 heads │ 256 vocab (raw bytes)
+  937K params │ 4 layers │ d_model=128 │ 4 heads │ 256 vocab (raw bytes)
 ```
 
-Each transformer block:
+Each transformer block: **Self-Attn → Tag-Attn → Mem-Attn → FFN**
 
 ```
   Input
     │
-    ├──► RMSNorm → Self-Attention (causal, RoPE) → + residual
+    ├──► Self-Attention (causal, RoPE)       local context
     │
-    ├──► RMSNorm → Memory Cross-Attention ──────── + residual
-    │                  ▲
-    │                  │ 9 memory vectors (persistent)
+    ├──► Tag Cross-Attention                 speaker/mode tracking
+    │         GRU-gated persistent register
     │
-    └──► RMSNorm → SiLU FFN (128→256→128) ──────── + residual
+    ├──► Memory Cross-Attention              global recall
+    │         ▲
+    │         │ up to 25 trie vectors (3 paths × hierarchy)
+    │
+    └──► SiLU FFN (128→256→128)
 ```
 
-### Memory-Based Chat
+### Memory = The Architecture
 
-User messages are encoded into memory via a frozen sliding window encoder, then the model generates responses with cross-attention to those memory slots. This means:
+This is the key insight. In a normal transformer, the weights store both
+computation patterns AND factual knowledge. ANT separates these:
 
-- **User question is always visible** — regardless of tag overhead or window size
-- **Multiple turns accumulate** — recent conversation history lives in memory
-- **Facts from `/mem add` merge** — passage memory and chat memory combine
+- **Weights** (937K params): learn attention patterns, address generation,
+  value projection, language modeling — pure computation
+- **Trie** (persistent, unbounded): stores every fact ever encountered as
+  EMA-blended vectors at hierarchical addresses
+
+Every token processed: READ from trie → process → WRITE to trie.
+Knowledge accumulates with every byte seen.
+
+### AddrNet Co-processors
+
+3 separate MLP networks (10.5K params each) that generate 8-level
+hierarchical addresses into the 256-ary trie:
+
+```
+  hidden → proj_in(128→16) → 8× [out(16→256) → Gumbel-softmax → embed(256,16) → SiLU(MLP)]
+                                                                    │
+                                                                    ▼
+                                                          address: [b0, b1, ..., b7]
+```
+
+### Hierarchical Trie
+
+```
+  256 bins per level × 8 levels deep = up to 256⁸ addresses
+  Every node stores: float32 vector (128-dim) + write_count
+
+  WRITE: V_proj(hidden) → value. EMA-blend at leaf + all ancestors.
+         Coarser nodes decay slower → stable category summaries.
+
+  READ:  3 addresses → 3 paths through trie → collect ALL ancestor vectors.
+         Root = global context. Leaves = specific facts.
+         Up to 25 unique vectors → cross-attention.
+```
+
+Storage: single flat binary file. ~500 bytes/node. 3ms load for 9K nodes.
 
 ### Sliding Window
 
-The causal sliding window processes input in overlapping 8-byte chunks across multiple passes. Each pass sees the full sequence but offset, creating an expanding receptive field:
+Causal sliding window with multi-pass refinement:
 
 ```
-  passes=1:   5 bytes visible per token
-  passes=4:  17 bytes visible per token
-  passes=8:  33 bytes visible per token
+  W=8, stride=1, passes=4 → ~16 bytes effective local context
+  Combined with trie cross-attention → unlimited global context
 ```
 
-For generation, the window slides indefinitely — **no output length limit**.
+## Training Curriculum
 
-### Persistent Memory
-
-```
-  Encode: passage → sliding window → per-sentence hidden states → memory slots
-  Read:   3 address heads × 8 dims → trie lookup → 9 vectors → cross-attend
-  Write:  EMA blending (won't overwrite, merges with existing)
-```
-
-Memory is separate from model weights. It can grow without increasing parameter count.
-
-## Results
-
-| Task | Accuracy | Notes |
-|------|----------|-------|
-| bAbI 1-fact QA | 100% | Single supporting fact recall |
-| bAbI 2-fact QA | 100% | Multi-hop entity→attribute |
-| bAbI 3-fact QA | 100% | Three-step reasoning chain |
-| Chat | Training in progress | Memory-based architecture |
-| LM (wiki+shell) | loss ~1.5 | Byte-level next-token prediction |
-
-## Training
-
-ANT uses a 3-phase curriculum:
-
-1. **Phase 1 — Language Model**: Causal LM on Wikipedia + shell commands (sliding window)
-2. **Phase 2 — LM + QA**: Add bAbI memory-recall tasks with cross-attention
-3. **Phase 3 — Full**: Add memory-based chat (user→memory, agent→sliding generation)
-
-The training pipeline is self-contained in `train_micro.py` (~4000 lines). Data sources:
-
-- **Wikipedia**: Sentence-level text for language modeling
-- **Shell**: Synthetic command patterns
-- **QA**: bAbI 1/2/3-fact memory tasks (synthetic)
-- **Chat**: 30K pairs from HuggingFace (UltraChat, SmolTalk)
+1. **Phase A — Base LM**: Language modeling on wiki + shell (no memory)
+2. **Phase B — Memory Training**: Freeze base, train AddrNet + V_proj + tags
+   with contrastive address loss and depth penalty
+3. **Phase C — End-to-End**: Unfreeze base (keep AddrNet/V_proj frozen),
+   every pass reads and writes the trie
 
 ## Files
 
 ```
-train_micro.py      Self-contained training pipeline (~4000 lines)
-                    Tokenizer, datasets, encoders, training loops, evaluation
-train_overnight.py  M4 MPS overnight training script (3-phase)
-train_colab.ipynb   A100 GPU training notebook (HuggingFace Hub integration)
-config.py           ModelConfig (828K) + MemoryConfig
-model.py            ANT transformer with cross-attention memory
-model_mlx.py        Apple Silicon optimized inference (MLX)
-memory.py           TrieIndex — persistent int8 vector store
-chat.py             Interactive terminal chat CLI
-benchmark.py        Inference + training performance benchmarks
+config.py           ModelConfig (937K) + MemoryConfig
+model.py            ANT transformer: AddrNet, MemoryAttention, tag system
+memory.py           HierarchicalTrie: binary serialization, EMA write, batch read
+train_micro.py      Training pipeline: data gen, sliding window, curriculum
+train_overnight.py  M4 MPS overnight training wrapper
+train_colab.ipynb   A100 GPU training notebook
+chat.py             Terminal chat interface (duplex streaming)
+model_mlx.py        Apple Silicon MLX inference port
+benchmark.py        Performance benchmarks
 ```
 
-## Key Design Decisions
-
-- **Pure byte vocabulary** — Token ID = raw byte value. No BPE, no subword tokenizer. Special tokens use ASCII control characters (NUL=PAD, STX=BOS, ETX=EOS)
-- **Cross-attention memory** — Dedicated memory attention layer per block, separate from self-attention. No distance limit on memory retrieval
-- **Memory-based chat** — User messages encoded into memory via frozen encoder. Solves the receptive field problem (tiny sliding window can't see past tags to the question)
-- **Sliding window generation** — Output streams indefinitely. No fixed output cap
-- **Weight-tied LM head** — Embedding matrix reused for output projection. Saves 32K params
-- **Spatiotemporal tags** — All data tagged as `host/agent/dataplane@timestamp: content`. Model learns to read/write this format natively
-
-## Chat Interface
-
-```
-$ python3 chat.py --checkpoint checkpoints/overnight/checkpoint_best.pt
-
-  🐜 ANT Terminal Canvas
-  ──────────────────────────────────────────
-  Model: 0.83M params | Memory-based chat
-  Type /help for commands, !cmd for shell
-
-kaaninel@mac> Hello
-ant@mac/chat Hello! How can I help you?
-
-kaaninel@mac> /mem add The capital of France is Paris
-  ✓ Encoded 1 sentence into memory
-
-kaaninel@mac> What is the capital of France?
-ant@mac/chat The capital of France is Paris.
-```
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full technical details.
 
 ## License
 
