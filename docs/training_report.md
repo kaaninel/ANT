@@ -10,16 +10,15 @@ learn only how to read and write the trie.
 - **Model architecture**: 937K params, AddrNet × 3, V_proj, tag system, MemoryAttention
 - **Forward pass**: works with and without memory vectors
 - **Memory system**: HierarchicalTrie with EMA, binary serialization, 34μs write, 7μs read
-- **QA accuracy**: 100% on bAbI 1/2/3-fact (achieved with old architecture, before trie rewrite)
+- **Trie bridge**: trie_write, trie_read, trie_write_all_tokens tested end-to-end
+- **Sliding window**: multi-pass encode with optional memory cross-attention
+- **Inference**: terminal chat with per-token trie read/write
 
-### What Needs Work
-- **Training pipeline**: Memory is NOT wired into the training loop. AddrNets and
-  V_proj exist but are never called during training. Training runs without any
-  trie reads or writes.
-- **train_micro.py**: ~2955 lines of dead code from old architecture iterations.
-  Memory API calls reference methods that no longer exist.
-- **chat.py**: References removed temporal_emb. Needs full rewrite for duplex streaming.
-- **Checkpoints**: Old checkpoints incompatible with new model (state dict mismatch).
+### Codebase (clean rewrite)
+- **data.py** (699 lines) — all data pipelines, tokenizer, generators, datasets
+- **train.py** (1035 lines) — Phase A/B/C curriculum with trie integration
+- **inference.py** (298 lines) — terminal chat with per-token trie read/write
+- Old files (train_micro.py, train_overnight.py, chat.py) deleted
 
 ## Training Data
 
@@ -36,7 +35,7 @@ shell/root@2026-04-01T14:22:33Z: ls -la /home
 wiki/article@2025-06-15T08:30:00Z: The French Revolution began in 1789.
 ```
 
-## Training Curriculum (Target)
+## Training Curriculum
 
 ### Phase A — Base Language Model
 - Wiki + shell → sliding window → causal LM loss
@@ -44,7 +43,7 @@ wiki/article@2025-06-15T08:30:00Z: The French Revolution began in 1789.
 - Establishes baseline LM loss
 
 ### Phase B — Memory Training
-- Freeze all base weights
+- Freeze all base weights (embed, layers, norm, halt_head)
 - Train only: 3 × AddrNet, V_proj, tag system
 - Losses:
   - Contrastive address loss (similar content → nearby addresses)
@@ -58,19 +57,14 @@ wiki/article@2025-06-15T08:30:00Z: The French Revolution began in 1789.
 - Every forward pass: trie READ + WRITE
 - LM + QA + Chat losses through memory
 
-## Known Issues
+## Known Limitations
 
-1. **Memory integration is broken in training code.** The MemorySystem constructor
-   signature changed but train_micro.py was never updated. Calls to
-   `.read_memory_batch()`, `.write_memory()`, `.rebuild_index()` reference
-   methods that don't exist on the current MemorySystem class.
+1. **LM output is incoherent without memory.** 937K params with byte-level
+   tokenization cannot produce fluent English from weights alone. This is
+   by design — the model's strength is memory recall.
 
-2. **LM output is incoherent.** Loss ~1.5 = ~4.5 bits/byte. With byte-level
-   tokenization, 937K params cannot produce fluent English. This is expected —
-   the model's strength is memory recall, not raw language modeling.
-
-3. **Chat training crashed.** Phase 3 (chat) fails due to broken memory API
-   and empty chat dataset construction. Must be fixed before resuming training.
+2. **Old checkpoints incompatible.** Previous checkpoints used different model
+   architecture. Training must restart from scratch with new code.
 
 ## Performance Benchmarks
 
@@ -82,8 +76,8 @@ wiki/article@2025-06-15T08:30:00Z: The French Revolution began in 1789.
 
 ## Next Steps
 
-1. Clean dead code from train_micro.py (~2955 lines)
-2. Wire MemorySystem into training loop (Phase A/B/C curriculum)
-3. Implement contrastive address loss for Phase B
-4. Rewrite chat.py for duplex streaming with per-token trie access
-5. Validate on bAbI with new architecture (target: 100% QA)
+1. Run Phase A training to establish baseline LM loss
+2. Run Phase B training for stable address space
+3. Run Phase C end-to-end training with trie
+4. Validate on bAbI with trie architecture (target: 100% QA)
+5. Update train_colab.ipynb for Colab training

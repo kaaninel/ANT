@@ -1,108 +1,160 @@
 # Copilot Instructions — ANT
 
+## ⚠️ MANDATORY PROCESS RULES
+
+These rules are non-negotiable. Violating them wastes time and creates broken code.
+
+1. **ALWAYS ask the user before making architectural decisions.** You implement,
+   you do not decide. If something is unclear, ask — do not assume.
+
+2. **Documentation first.** When changing architecture or behavior, update the
+   relevant docs BEFORE writing code. Docs are the source of truth. Code follows
+   docs, never the reverse.
+
+3. **Never leave deprecated documents.** If you change something, update every
+   doc that references it in the same session. Stale docs cause confusion.
+
+4. **Memory IS the architecture.** Every forward pass MUST read from the trie.
+   Every encoding MUST write to the trie. The trie is not optional, not
+   secondary, not a feature. It IS the system. Without memory, ANT outputs
+   random bytes. Never implement a code path that bypasses memory.
+
+5. **No prototypes or toys.** Write production-quality code. Every implementation
+   must actually work end-to-end with the memory system. A working system that
+   does one thing is better than a broken system that attempts five things.
+
 ## What This Is
 
-ANT is an 828K parameter byte-level transformer with persistent external memory and memory-based chat via cross-attention. Research prototype — not a standard ML training repo. The entire training pipeline (tokenizer, datasets, encoders, training loops, evaluation) lives in a single file (`train_micro.py`, ~4000 lines).
+ANT is a 937K parameter byte-level transformer where the weights contain NO
+knowledge. ALL knowledge lives in a persistent hierarchical trie memory accessed
+via cross-attention. The weights learn HOW to read and write. The trie stores
+WHAT was learned.
+
+## Core Architecture
+
+```
+  937K params │ 4 layers │ d_model=128 │ 4 heads │ 256 vocab (raw bytes)
+
+  Layer order: Self-Attn → Tag-Attn → Mem-Attn → FFN
+
+  Components:
+    Byte Embedding:     256 × 128 (weight-tied with LM head)
+    TransformerBlock:   4 layers, each with self-attn + tag-attn + mem-attn + FFN
+    AddrNet (×3):       MLP co-processors, 8 clock cycles each, Gumbel-softmax
+    V_proj:             Linear(128→128), projects hidden → stored value
+    Tag system:         tag_head + tag_gate + tag_register (GRU-style)
+    Halt head:          Linear(128→2), decides continue/halt
+```
+
+### Memory Data Flow (every single token)
+
+```
+  1. READ:  3 AddrNets → 3 addresses → traverse trie → collect ancestor vectors
+           → up to 25 vectors → memory cross-attention at each layer
+  2. PROCESS: Self-Attn (local) + Tag-Attn (context) + Mem-Attn (global) + FFN
+  3. WRITE: V_proj(hidden) → value. Write at 3 leaf addresses + EMA to ancestors.
+  4. OUTPUT: LM head → next byte logits. Halt head → continue/halt.
+```
+
+This cycle happens for EVERY token. Memory is not a separate phase or mode.
+
+### Hierarchical Trie
+
+```
+  256-ary tree, 8 levels deep, float32 vectors (128-dim) at every node
+  Write: EMA blend at leaf + decay-propagate to all ancestors
+  Read:  Collect ALL ancestor vectors along 3 paths = up to 25 unique vectors
+  Storage: single flat binary file (header + values + write_counts + adjacency)
+  Performance: 34μs write, 7μs read, 3ms load for 9K nodes
+```
+
+### AddrNet
+
+```
+  3 separate MLP co-processors, ~10.5K params each
+  proj_in(128→16) + 8× [out(16→256) → Gumbel-softmax → embed(256,16) → SiLU(MLP)]
+  Training: Gumbel-softmax (hard=True, differentiable)
+  Inference: argmax (deterministic)
+```
 
 ## Running
 
 ```bash
-# Activate the venv first (Python 3.14, PyTorch, datasets, numpy)
-source .venv/bin/activate
+source .venv/bin/activate  # Python 3.14, PyTorch, datasets, numpy
 
-# QA-only training (~10 min on MPS)
-python train_micro.py --chunk_size 16
+# Train
+python3 train.py 2>&1 | tee training.log
 
-# Multi-task: LM (shell+wiki) + QA (bAbI) (~25 min)
-python train_micro.py --chunk_size 16 --multitask
+# A100 training (Colab)
+# Open train_colab.ipynb
 
-# Eval only (loads last checkpoint)
-python train_micro.py --eval_only
+# Chat interface
+python3 inference.py
 
-# Quick smoke test — verify imports and forward pass
+# Smoke test
 python -c "from config import ModelConfig; from model import ANT; import torch; m = ANT(ModelConfig()); print(sum(p.numel() for p in m.parameters()))"
 ```
 
-There are no linters, formatters, or test suites configured.
+No linters, formatters, or test suites configured.
 
-## Architecture (4 files, ~4000 lines total)
+## Files
 
 ```
-config.py          ModelConfig (828K) + MemoryConfig
-model.py           ANT — the transformer with cross-attention memory
-memory.py          TrieIndex persistent memory system (int8 vectors on disk)
-train_micro.py     Everything else: tokenizer, data gen, encoders, training, eval
+config.py           ModelConfig (937K) + MemoryConfig — single source of truth
+model.py            ANT transformer: AddrNet, MemoryAttention, tag system
+memory.py           HierarchicalTrie: binary serialization, EMA, batch read/write
+data.py             Data pipelines: tokenizer, QA/shell/wiki/chat generators
+train.py            Training: Phase A/B/C curriculum, trie read/write bridge
+inference.py        Terminal chat: duplex streaming, per-token trie read/write
+train_colab.ipynb   A100 GPU notebook
+model_mlx.py        Apple Silicon MLX inference port
+benchmark.py        Performance benchmarks
 ```
-
-`train_micro.py` is intentionally monolithic — it's a research prototype where rapid iteration matters more than modularity. Don't refactor it into multiple files unless explicitly asked.
-
-### Data flow
-
-1. **Encode**: Passage → sliding window chunks → causal forward → per-token hidden states → memory vectors (quantized to int8, stored in TrieIndex by learned address)
-2. **Decode**: Question → causal forward with memory cross-attention (9 retrieved vectors per read) → answer logits
-3. **LM mode**: Raw text → standard causal forward (no sliding window, no memory) → next-byte prediction
-
-### Two forward paths
-
-The model has two distinct forward paths — this is a critical performance decision:
-- **QA path**: `encode_streaming_memory()` → `sliding_lm_encode()` with memory cross-attention. Slow (~0.2 it/s if used for everything).
-- **LM path**: `model(token_ids=...)` — standard causal forward, no memory. Fast (~1.5 it/s).
-
-Multi-task training alternates between these. Never use the QA path for plain LM training.
-
-### Transformer block structure
-
-Each of the 4 layers: **RMSNorm → Self-Attention (causal, RoPE) → RMSNorm → Memory Cross-Attention → RMSNorm → SiLU FFN**
-
-Memory cross-attention uses learned inverse-temperature per head and attends to external memory vectors (not the input sequence).
 
 ## Key Conventions
 
-### Pure byte vocabulary (no tokenizer)
+### Pure byte vocabulary
 
-Token ID = raw byte value. `tokenize("hi")` returns `[104, 105]`. Vocabulary is exactly 256. There is no BPE, no subword tokenizer, no offset.
+Token ID = raw byte value. `tokenize("hi")` = `[104, 105]`. Vocab is exactly
+256. No BPE, no subword tokenizer. Special tokens use ASCII control characters:
 
-Special tokens are ASCII control characters — do not add new special tokens with IDs ≥ 256:
 ```
-PAD=0x00(NUL)  BOS=0x02(STX)  EOS=0x03(ETX)  ANS=0x05(ENQ)
-MEM_START=0x01(SOH)  MEM_END=0x04(EOT)  NOOP=0x06(ACK)  UNK=0x1A(SUB)
+PAD=0x00  MEM_START=0x01  BOS=0x02  EOS=0x03
+MEM_END=0x04  ANS=0x05  NOOP=0x06  UNK=0x1A
 ```
 
-### Training curriculum matters
+Do NOT add tokens with IDs ≥ 256.
 
-QA training uses a staged curriculum (D1→D2). Skipping stages or changing ratios breaks learning:
-- **Phase D1** (first 30% of steps): No passage in context, frozen encoder. Forces the model to read from memory instead of copying from context.
-- **Phase D2** (remaining 70%): No passage in context, differentiable encoder. End-to-end gradient flow through memory.
+### Config is the single source of truth
 
-### Memory system is external and persistent
+`ModelConfig` in `config.py` controls all dimensions: d_model, n_heads,
+vocab_size, special token IDs, memory parameters. `model.py` reads everything
+from config. Never hardcode dimensions.
 
-`MemorySystem` in `memory.py` is a trie-indexed flat file of int8 vectors, not part of the model's parameters. Three address heads (each Linear(128→8)) produce addresses for lookup. Neighbor search (±1 on each dimension) provides implicit clustering. EMA blending prevents catastrophic overwriting.
+### Spatiotemporal tags
 
-### Config is the single source of truth for model dimensions
+All data tagged as `host/agent/dataplane@ISO-timestamp: content`. The tag
+system in each TransformerBlock tracks current speaker/context/mode via a
+GRU-gated persistent register.
 
-`ModelConfig` in `config.py` controls everything: d_model, n_heads, vocab_size, special token IDs, memory parameters, and chunk encoding settings. `model.py` reads all dimensions from the config object passed to `ANT.__init__`. Don't hardcode dimensions.
+### Training curriculum
 
-### Experiment results to preserve
+```
+Phase A: Base LM (no memory) — learn language patterns
+Phase B: Freeze base, train AddrNet/V_proj/tags — learn stable address space
+Phase C: Unfreeze base (keep AddrNet/V_proj frozen) — learn to use memory
+```
 
-Current best: **99.5% QA accuracy** (bAbI 1/2/3-fact) with simultaneous LM training (loss 2.49). Achieved with `--chunk_size 16 --multitask`. Any architecture changes should be validated against this baseline.
+### Inference: duplex streaming
 
-## Common CLI Flags
+Model reads and generates simultaneously. NOOP token (0x06) = "nothing to
+say yet". Halt head decides 1–4 memory fetch cycles per output token.
 
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--chunk_size` | `None` (uses config) | Sliding window chunk size for encoder |
-| `--multitask` | off | Enable LM + QA multi-task training |
-| `--encoder_mode` | `sentence` | Encoder type: `sentence`, `sliding`, `sliding_lm`, `enc_dec` |
-| `--num_passes` | 4 | Number of sliding window passes |
-| `--n_shell` / `--n_wiki` | 5000 | Number of shell/Wikipedia training examples |
-| `--lm_weight` / `--qa_weight` | 0.5 | Loss weights for multi-task |
-| `--phase_d_steps` | 3000 | Main training phase steps |
-| `--device` | auto-detect | Force `cpu`, `mps`, or `cuda` |
+## Gotchas
 
-## Codebase-Specific Gotchas
-
-- `model.forward()` returns a tuple `(logits, halt_logits, ...)` — always unpack or index `[0]` for logits.
-- Memory cross-attention uses `memory_keys` and `memory_values` kwargs (not `memory_kv`).
-- The LM head is weight-tied with the embedding: `F.linear(hidden, model.embed.weight)`.
-- `data_cache/` stores downloaded Wikipedia sentences — auto-regenerated if missing.
-- `checkpoints/` can grow large (1.5GB+) across experiments. Each run saves to a subdirectory under `--output_dir`.
+- `model.forward()` returns `(logits, halt_logits, ...)` — unpack or index `[0]`
+- Memory cross-attention uses `memory_keys` and `memory_values` kwargs
+- LM head is weight-tied: `F.linear(hidden, model.embed.weight)`
+- `data_cache/` stores downloaded data — auto-regenerated if missing
+- `checkpoints/` can grow large across experiments
+- ANT does not stand for anything — it is just "ANT"

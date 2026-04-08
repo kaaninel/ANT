@@ -1,238 +1,0 @@
-  ANT overnight script starting...
-======================================================================
-  ANT — Overnight Training (M4 MPS)
-======================================================================
-  Device:     mps
-  HF source:  kaaninel/ANT/checkpoints/chat/checkpoint_latest.pt
-  Output:     checkpoints/overnight
-  Phases:     P1=0 P2=0 P3=2000
-  Total:      2,000 steps
-  Data:       wiki=50,000 shell=5,000 qa=20,000 chat=10,000
-  Window:     W=8 passes=2 stride=1
-  Batch:      32 × 1 = 32 effective
-  Est time:   ~0.8h at 0.7 it/s
-
-
-  ┌─── Model Architecture ───
-  │ d_model=128  n_heads=4  head_dim=32
-  │ n_layers=4  ffn_dim=256  max_seq=192
-  │ mem_slots=9  max_memory_slots=9  addr_heads=3  addr_dim=8
-  │ params: 828,306 total (0.83M), 828,306 trainable
-  │ breakdown: embed=32,768  layers=787,984  heads=3,330  lm_head=0
-  └────────────────────
-
-  Loading weights from checkpoints/overnight/checkpoint_best.pt...
-  ✓ Loaded (step=13000, QA=0.0%)
-
-
-============================================================
-  ANT — Unified Causal Sliding Window Training
-============================================================
-  Window size:     8
-  Stride:          1
-  Num passes:      2
-  Batch size:      32 (micro) × 1 accum = 32 effective
-  BF16:            False
-  Compile:         False
-  Phase 1 (LM):    0 steps
-  Phase 2 (LM+QA): 0 steps
-  Phase 3 (all):   2000 steps
-  Total:           2000 steps
-  Output:          checkpoints/overnight
-
-  Loading data...
-  Loading cached Wikipedia sentences from data_cache/wiki_sentences_50000.txt
-    Wikipedia: 50000 sentences
-    Shell:     5000 commands
-    Chat:      10000 pairs
-    QA train:  20000 examples
-    QA val:    500 examples
-    LM dataset:   55000 samples
-    Chat dataset: 10000 samples
-
-  ────────────────────────────────────────────────────────
-  Training started at 11:13:54
-  ────────────────────────────────────────────────────────
-  [P3     1/2000] loss=2.5273 lm=3.1402 qa=0.1381 chat=4.2850 gnorm=9.43 lr=3.3e-07 spd=0.0it/s [3s / ETA 5212s]
-  [P3    25/2000] loss=2.1981 lm=2.7316 qa=0.0560 chat=3.7904 gnorm=6.10 lr=8.3e-06 spd=0.4it/s [59s / ETA 4648s]
-  [P3    50/2000] loss=1.6493 lm=2.2651 qa=0.0314 chat=2.6329 gnorm=2.43 lr=1.7e-05 spd=0.4it/s [129s / ETA 5036s]
-  [P3    75/2000] loss=1.2454 lm=2.0196 qa=0.0171 chat=1.6761 gnorm=1.32 lr=2.5e-05 spd=0.3it/s [206s / ETA 5280s]
-  [P3   100/2000] loss=1.0523 lm=1.8624 qa=0.0251 chat=1.2447 gnorm=1.20 lr=3.3e-05 spd=0.3it/s [282s / ETA 5367s]
-  [P3   125/2000] loss=1.0642 lm=1.9858 qa=0.0066 chat=1.1721 gnorm=1.01 lr=3.3e-05 spd=0.3it/s [359s / ETA 5378s]
-  [P3   150/2000] loss=0.9968 lm=1.8295 qa=0.0032 chat=1.1325 gnorm=0.99 lr=3.3e-05 spd=0.3it/s [433s / ETA 5341s]
-  [P3   175/2000] loss=1.0105 lm=1.9232 qa=0.0059 chat=1.0747 gnorm=1.03 lr=3.3e-05 spd=0.3it/s [508s / ETA 5295s]
-  [P3   200/2000] loss=0.9458 lm=1.7870 qa=0.0049 chat=1.0202 gnorm=0.95 lr=3.3e-05 spd=0.3it/s [582s / ETA 5238s]
-  [P3   225/2000] loss=0.9637 lm=1.8393 qa=0.0036 chat=1.0218 gnorm=0.96 lr=3.3e-05 spd=0.3it/s [656s / ETA 5174s]
-  [P3   250/2000] loss=0.9610 lm=1.8593 qa=0.0058 chat=0.9906 gnorm=1.00 lr=3.3e-05 spd=0.3it/s [730s / ETA 5110s]
-  [P3   275/2000] loss=0.8996 lm=1.6833 qa=0.0044 chat=0.9872 gnorm=0.95 lr=3.2e-05 spd=0.3it/s [804s / ETA 5044s]
-  [P3   300/2000] loss=0.8760 lm=1.6866 qa=0.0032 chat=0.9137 gnorm=1.14 lr=3.2e-05 spd=0.3it/s [878s / ETA 4974s]
-  [P3   325/2000] loss=0.9033 lm=1.7386 qa=0.0031 chat=0.9429 gnorm=0.93 lr=3.2e-05 spd=0.3it/s [947s / ETA 4883s]
-  [P3   350/2000] loss=0.9195 lm=1.8172 qa=0.0029 chat=0.9112 gnorm=1.01 lr=3.2e-05 spd=0.4it/s [1014s / ETA 4781s]
-  [P3   375/2000] loss=0.8918 lm=1.7451 qa=0.0051 chat=0.8994 gnorm=1.01 lr=3.1e-05 spd=0.4it/s [1081s / ETA 4684s]
-  [P3   400/2000] loss=0.8578 lm=1.6970 qa=0.0023 chat=0.8489 gnorm=0.99 lr=3.1e-05 spd=0.4it/s [1147s / ETA 4590s]
-  [P3   425/2000] loss=0.8832 lm=1.7451 qa=0.0032 chat=0.8752 gnorm=0.98 lr=3.1e-05 spd=0.4it/s [1214s / ETA 4499s]
-  [P3   450/2000] loss=0.9020 lm=1.8074 qa=0.0029 chat=0.8682 gnorm=1.01 lr=3.0e-05 spd=0.4it/s [1280s / ETA 4409s]
-  [P3   475/2000] loss=0.8864 lm=1.7535 qa=0.0034 chat=0.8761 gnorm=1.09 lr=3.0e-05 spd=0.4it/s [1346s / ETA 4322s]
-  [P3   500/2000] loss=0.8659 lm=1.7034 qa=0.0052 chat=0.8638 gnorm=1.06 lr=3.0e-05 spd=0.4it/s [1412s / ETA 4237s]
-    1-fact: 42/42 = 100.0%
-    2-fact: 37/37 = 100.0%
-    3-fact: 21/21 = 100.0%
-
-  ╔══ EVAL @ step 500 (Phase 3) ══
-  ║ QA Accuracy: 100.0%  (best: 100.0%)
-  ║ LM loss: 1.7034
-  ║ QA loss: 0.0052
-  ║ Chat loss: 0.8638
-  ║ Sample: The state is a label of the next or some capital of Australia, is a state single
-  ╚════════════════════════════════════════
-
-  ✓ Best checkpoint saved (QA: 100.0%)
-  [P3   525/2000] loss=0.8816 lm=1.7879 qa=0.0018 chat=0.8278 gnorm=1.11 lr=2.9e-05 spd=0.4it/s [1481s / ETA 4162s]
-  [P3   550/2000] loss=0.8588 lm=1.6772 qa=0.0016 chat=0.8729 gnorm=1.05 lr=2.9e-05 spd=0.4it/s [1547s / ETA 4079s]
-  [P3   575/2000] loss=0.8809 lm=1.7689 qa=0.0030 chat=0.8439 gnorm=1.02 lr=2.8e-05 spd=0.4it/s [1614s / ETA 3999s]
-  [P3   600/2000] loss=0.9010 lm=1.8073 qa=0.0056 chat=0.8627 gnorm=1.14 lr=2.8e-05 spd=0.4it/s [1680s / ETA 3920s]
-  [P3   625/2000] loss=0.9245 lm=1.8864 qa=0.0017 chat=0.8561 gnorm=1.22 lr=2.7e-05 spd=0.4it/s [1746s / ETA 3842s]
-  [P3   650/2000] loss=0.8662 lm=1.7278 qa=0.0018 chat=0.8428 gnorm=0.99 lr=2.7e-05 spd=0.4it/s [1812s / ETA 3763s]
-  [P3   675/2000] loss=0.8426 lm=1.6854 qa=0.0013 chat=0.8154 gnorm=1.05 lr=2.6e-05 spd=0.4it/s [1878s / ETA 3686s]
-  [P3   700/2000] loss=0.8791 lm=1.8102 qa=0.0015 chat=0.7973 gnorm=1.14 lr=2.6e-05 spd=0.4it/s [1944s / ETA 3610s]
-  [P3   725/2000] loss=0.8608 lm=1.7497 qa=0.0013 chat=0.8046 gnorm=0.98 lr=2.5e-05 spd=0.4it/s [2010s / ETA 3535s]
-  [P3   750/2000] loss=0.8649 lm=1.8035 qa=0.0020 chat=0.7608 gnorm=1.03 lr=2.5e-05 spd=0.4it/s [2076s / ETA 3460s]
-  [P3   775/2000] loss=0.8390 lm=1.6738 qa=0.0015 chat=0.8164 gnorm=1.11 lr=2.4e-05 spd=0.4it/s [2142s / ETA 3386s]
-  [P3   800/2000] loss=0.8918 lm=1.8396 qa=0.0018 chat=0.8054 gnorm=1.11 lr=2.3e-05 spd=0.4it/s [2209s / ETA 3313s]
-  [P3   825/2000] loss=0.8889 lm=1.8016 qa=0.0020 chat=0.8356 gnorm=1.21 lr=2.3e-05 spd=0.4it/s [2275s / ETA 3240s]
-  [P3   850/2000] loss=0.8727 lm=1.7863 qa=0.0031 chat=0.8011 gnorm=1.14 lr=2.2e-05 spd=0.4it/s [2341s / ETA 3168s]
-  [P3   875/2000] loss=0.8817 lm=1.7921 qa=0.0022 chat=0.8233 gnorm=1.05 lr=2.2e-05 spd=0.4it/s [2408s / ETA 3095s]
-  [P3   900/2000] loss=0.8544 lm=1.7386 qa=0.0015 chat=0.7964 gnorm=1.14 lr=2.1e-05 spd=0.4it/s [2474s / ETA 3024s]
-  [P3   925/2000] loss=0.8390 lm=1.7184 qa=0.0013 chat=0.7705 gnorm=1.13 lr=2.0e-05 spd=0.4it/s [2541s / ETA 2953s]
-  [P3   950/2000] loss=0.8284 lm=1.6752 qa=0.0016 chat=0.7827 gnorm=1.04 lr=2.0e-05 spd=0.4it/s [2607s / ETA 2881s]
-  [P3   975/2000] loss=0.8305 lm=1.7097 qa=0.0039 chat=0.7513 gnorm=1.11 lr=1.9e-05 spd=0.4it/s [2673s / ETA 2810s]
-  [P3  1000/2000] loss=0.9125 lm=1.9218 qa=0.0014 chat=0.7836 gnorm=1.06 lr=1.8e-05 spd=0.4it/s [2739s / ETA 2739s]
-    1-fact: 42/42 = 100.0%
-    2-fact: 37/37 = 100.0%
-    3-fact: 21/21 = 100.0%
-
-  ╔══ EVAL @ step 1000 (Phase 3) ══
-  ║ QA Accuracy: 100.0%  (best: 100.0%)
-  ║ LM loss: 1.9218
-  ║ QA loss: 0.0014
-  ║ Chat loss: 0.7836
-  ║ Sample: The large to first matters are of programming the American as an arrace of Anna 
-  ╚════════════════════════════════════════
-
-  ✓ Best checkpoint saved (QA: 100.0%)
-  [P3  1025/2000] loss=0.8567 lm=1.7999 qa=0.0022 chat=0.7394 gnorm=1.11 lr=1.8e-05 spd=0.4it/s [2807s / ETA 2670s]
-  [P3  1050/2000] loss=0.8263 lm=1.6472 qa=0.0010 chat=0.8057 gnorm=1.11 lr=1.7e-05 spd=0.4it/s [2875s / ETA 2601s]
-  [P3  1075/2000] loss=0.8593 lm=1.7262 qa=0.0009 chat=0.8244 gnorm=1.14 lr=1.6e-05 spd=0.4it/s [2941s / ETA 2531s]
-  [P3  1100/2000] loss=0.8848 lm=1.8093 qa=0.0029 chat=0.8142 gnorm=1.12 lr=1.6e-05 spd=0.4it/s [3008s / ETA 2461s]
-  [P3  1125/2000] loss=0.8178 lm=1.6698 qa=0.0038 chat=0.7540 gnorm=1.17 lr=1.5e-05 spd=0.4it/s [3074s / ETA 2391s]
-  [P3  1150/2000] loss=0.8657 lm=1.8206 qa=0.0015 chat=0.7461 gnorm=1.08 lr=1.4e-05 spd=0.4it/s [3141s / ETA 2322s]
-  [P3  1175/2000] loss=0.7997 lm=1.6393 qa=0.0026 chat=0.7317 gnorm=0.98 lr=1.4e-05 spd=0.4it/s [3212s / ETA 2255s]
-  [P3  1200/2000] loss=0.8852 lm=1.8459 qa=0.0017 chat=0.7790 gnorm=0.98 lr=1.3e-05 spd=0.4it/s [3283s / ETA 2189s]
-  [P3  1225/2000] loss=0.8509 lm=1.7625 qa=0.0016 chat=0.7610 gnorm=1.03 lr=1.2e-05 spd=0.4it/s [3354s / ETA 2122s]
-  [P3  1250/2000] loss=0.8149 lm=1.6832 qa=0.0011 chat=0.7341 gnorm=0.99 lr=1.2e-05 spd=0.4it/s [3422s / ETA 2053s]
-  [P3  1275/2000] loss=0.8434 lm=1.7514 qa=0.0013 chat=0.7498 gnorm=1.07 lr=1.1e-05 spd=0.4it/s [3491s / ETA 1985s]
-  [P3  1300/2000] loss=0.8452 lm=1.7478 qa=0.0011 chat=0.7593 gnorm=1.05 lr=1.1e-05 spd=0.4it/s [3563s / ETA 1919s]
-  [P3  1325/2000] loss=0.8143 lm=1.6756 qa=0.0011 chat=0.7402 gnorm=1.16 lr=1.0e-05 spd=0.4it/s [3633s / ETA 1851s]
-  [P3  1350/2000] loss=0.8581 lm=1.7538 qa=0.0012 chat=0.7923 gnorm=1.16 lr=9.4e-06 spd=0.4it/s [3701s / ETA 1782s]
-  [P3  1375/2000] loss=0.8623 lm=1.7880 qa=0.0018 chat=0.7692 gnorm=1.10 lr=8.8e-06 spd=0.4it/s [3769s / ETA 1713s]
-  [P3  1400/2000] loss=0.8113 lm=1.6662 qa=0.0010 chat=0.7407 gnorm=1.05 lr=8.2e-06 spd=0.4it/s [3840s / ETA 1646s]
-  [P3  1425/2000] loss=0.8710 lm=1.8155 qa=0.0018 chat=0.7670 gnorm=1.25 lr=7.7e-06 spd=0.4it/s [3907s / ETA 1577s]
-  [P3  1450/2000] loss=0.8143 lm=1.6398 qa=0.0014 chat=0.7768 gnorm=1.14 lr=7.2e-06 spd=0.4it/s [3972s / ETA 1507s]
-  [P3  1475/2000] loss=0.8063 lm=1.6390 qa=0.0019 chat=0.7527 gnorm=1.05 lr=6.7e-06 spd=0.4it/s [4036s / ETA 1436s]
-  [P3  1500/2000] loss=0.8268 lm=1.7117 qa=0.0015 chat=0.7403 gnorm=0.99 lr=6.2e-06 spd=0.4it/s [4098s / ETA 1366s]
-    1-fact: 42/42 = 100.0%
-    2-fact: 37/37 = 100.0%
-    3-fact: 21/21 = 100.0%
-
-  ╔══ EVAL @ step 1500 (Phase 3) ══
-  ║ QA Accuracy: 100.0%  (best: 100.0%)
-  ║ LM loss: 1.7117
-  ║ QA loss: 0.0015
-  ║ Chat loss: 0.7403
-  ║ Sample: The may form of all military from the the moon was a more with a campaing?
-local
-  ╚════════════════════════════════════════
-
-  ✓ Best checkpoint saved (QA: 100.0%)
-  [P3  1525/2000] loss=0.8252 lm=1.7015 qa=0.0018 chat=0.7458 gnorm=1.12 lr=5.7e-06 spd=0.4it/s [4163s / ETA 1297s]
-  [P3  1550/2000] loss=0.8019 lm=1.6695 qa=0.0011 chat=0.7089 gnorm=1.08 lr=5.2e-06 spd=0.4it/s [4227s / ETA 1227s]
-  [P3  1575/2000] loss=0.8296 lm=1.7127 qa=0.0014 chat=0.7478 gnorm=1.08 lr=4.8e-06 spd=0.4it/s [4291s / ETA 1158s]
-  [P3  1600/2000] loss=0.8231 lm=1.6707 qa=0.0016 chat=0.7714 gnorm=0.97 lr=4.4e-06 spd=0.4it/s [4354s / ETA 1089s]
-  [P3  1625/2000] loss=0.8188 lm=1.6927 qa=0.0015 chat=0.7357 gnorm=1.09 lr=4.0e-06 spd=0.4it/s [4416s / ETA 1019s]
-  [P3  1650/2000] loss=0.8448 lm=1.7467 qa=0.0009 chat=0.7596 gnorm=1.25 lr=3.6e-06 spd=0.4it/s [4477s / ETA 950s]
-  [P3  1675/2000] loss=0.8209 lm=1.6853 qa=0.0011 chat=0.7503 gnorm=1.06 lr=3.3e-06 spd=0.4it/s [4539s / ETA 881s]
-  [P3  1700/2000] loss=0.8480 lm=1.7634 qa=0.0012 chat=0.7516 gnorm=1.20 lr=2.9e-06 spd=0.4it/s [4601s / ETA 812s]
-  [P3  1725/2000] loss=0.8078 lm=1.6897 qa=0.0011 chat=0.7057 gnorm=1.07 lr=2.6e-06 spd=0.4it/s [4667s / ETA 744s]
-  [P3  1750/2000] loss=0.8365 lm=1.7473 qa=0.0011 chat=0.7333 gnorm=1.07 lr=2.3e-06 spd=0.4it/s [4732s / ETA 676s]
-  [P3  1775/2000] loss=0.8182 lm=1.6767 qa=0.0015 chat=0.7504 gnorm=1.08 lr=2.1e-06 spd=0.4it/s [4799s / ETA 608s]
-  [P3  1800/2000] loss=0.8280 lm=1.7138 qa=0.0014 chat=0.7420 gnorm=1.09 lr=1.9e-06 spd=0.4it/s [4866s / ETA 541s]
-  [P3  1825/2000] loss=0.8298 lm=1.6812 qa=0.0017 chat=0.7808 gnorm=1.04 lr=1.7e-06 spd=0.4it/s [4929s / ETA 473s]
-  [P3  1850/2000] loss=0.8345 lm=1.6972 qa=0.0018 chat=0.7782 gnorm=0.96 lr=1.5e-06 spd=0.4it/s [4990s / ETA 405s]
-  [P3  1875/2000] loss=0.8146 lm=1.6816 qa=0.0022 chat=0.7337 gnorm=0.99 lr=1.3e-06 spd=0.4it/s [5052s / ETA 337s]
-  [P3  1900/2000] loss=0.7973 lm=1.6269 qa=0.0013 chat=0.7386 gnorm=1.03 lr=1.2e-06 spd=0.4it/s [5114s / ETA 269s]
-  [P3  1925/2000] loss=0.8167 lm=1.6823 qa=0.0013 chat=0.7402 gnorm=0.97 lr=1.1e-06 spd=0.4it/s [5176s / ETA 202s]
-  [P3  1950/2000] loss=0.7812 lm=1.5946 qa=0.0011 chat=0.7233 gnorm=1.03 lr=1.1e-06 spd=0.4it/s [5238s / ETA 134s]
-  [P3  1975/2000] loss=0.7892 lm=1.5974 qa=0.0014 chat=0.7442 gnorm=1.01 lr=1.0e-06 spd=0.4it/s [5301s / ETA 67s]
-  [P3  2000/2000] loss=0.8194 lm=1.6662 qa=0.0015 chat=0.7648 gnorm=1.07 lr=1.0e-06 spd=0.4it/s [5365s / ETA 0s]
-    1-fact: 42/42 = 100.0%
-    2-fact: 37/37 = 100.0%
-    3-fact: 21/21 = 100.0%
-
-  ╔══ EVAL @ step 2000 (Phase 3) ══
-  ║ QA Accuracy: 100.0%  (best: 100.0%)
-  ║ LM loss: 1.6662
-  ║ QA loss: 0.0015
-  ║ Chat loss: 0.7648
-  ║ Sample: The posts of the charges of the largest programming card to be discovered progra
-  ╚════════════════════════════════════════
-
-  ✓ Best checkpoint saved (QA: 100.0%)
-Processing Files (0 / 0)      : |          |  0.00B /  0.00B            
-New Data Upload               : |          |  0.00B /  0.00B            [A
-
-  ...ight/checkpoint_latest.pt:  17%|█▋        |  614kB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt:  17%|█▋        |  614kB / 3.68MB            [A[AProcessing Files (0 / 1)      :  17%|█▋        |  614kB / 3.68MB,  768kB/s  
-New Data Upload               :  17%|█▋        |  614kB / 3.68MB,  768kB/s  [A
-
-  ...ight/checkpoint_latest.pt:  17%|█▋        |  614kB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt:  17%|█▋        |  614kB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt:  33%|███▎      | 1.23MB / 3.68MB            [A[AProcessing Files (0 / 1)      :  33%|███▎      | 1.23MB / 3.68MB,  878kB/s  
-New Data Upload               :  33%|███▎      | 1.23MB / 3.68MB,  878kB/s  [A
-
-  ...ight/checkpoint_latest.pt:  83%|████████▎ | 3.07MB / 3.68MB            [A[AProcessing Files (0 / 1)      :  83%|████████▎ | 3.07MB / 3.68MB, 1.92MB/s  
-New Data Upload               :  83%|████████▎ | 3.07MB / 3.68MB, 1.92MB/s  [A
-
-  ...ight/checkpoint_latest.pt:  83%|████████▎ | 3.07MB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt:  83%|████████▎ | 3.07MB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt:  83%|████████▎ | 3.07MB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt: 100%|██████████| 3.68MB / 3.68MB            [A[AProcessing Files (1 / 1)      : 100%|██████████| 3.68MB / 3.68MB, 1.53MB/s  
-New Data Upload               : 100%|██████████| 3.68MB / 3.68MB, 1.53MB/s  [A
-
-  ...ight/checkpoint_latest.pt: 100%|██████████| 3.68MB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt: 100%|██████████| 3.68MB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt: 100%|██████████| 3.68MB / 3.68MB            [A[A
-
-  ...ight/checkpoint_latest.pt: 100%|██████████| 3.68MB / 3.68MB            [A[AProcessing Files (1 / 1)      : 100%|██████████| 3.68MB / 3.68MB, 1.23MB/s  
-New Data Upload               : 100%|██████████| 3.68MB / 3.68MB, 1.23MB/s  
-  ...ight/checkpoint_latest.pt: 100%|██████████| 3.68MB / 3.68MB            
-    ↑ Uploaded to HF: kaaninel/ANT
-
-  ════════════════════════════════════════════════════════
-  Training complete in 5379s (89.6 min)
-  Best QA accuracy: 100.0% at step 500
-  Speed: 0.37 it/s avg
-  ════════════════════════════════════════════════════════
-
-======================================================================
-  Overnight training complete.
-  Best QA: 100.0%
-  Checkpoint: checkpoints/overnight/checkpoint_best.pt
-======================================================================

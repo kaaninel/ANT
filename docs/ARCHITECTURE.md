@@ -373,10 +373,10 @@ MemoryConfig(
   model.py            ANT transformer (AddrNet, Attention, MemoryAttention,
                       TransformerBlock, StaticKVCache)
   memory.py           HierarchicalTrie + MemorySystem (binary serialization)
-  train_micro.py      Training pipeline: data gen, sliding window, curriculum
-  train_overnight.py  M4 MPS overnight training wrapper
+  data.py             Data pipelines: tokenizer, QA/shell/wiki/chat generators
+  train.py            Training: Phase A/B/C curriculum, trie read/write bridge
+  inference.py        Terminal chat interface (duplex streaming, per-token trie)
   train_colab.ipynb   A100 GPU training notebook
-  chat.py             Terminal chat interface
   benchmark.py        Performance benchmarks
   model_mlx.py        Apple Silicon MLX inference port
 ```

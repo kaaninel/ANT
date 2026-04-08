@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Performance benchmarks for ANT (828K params).
+"""Performance benchmarks for ANT (937K params).
 
 Measures tokens/second for:
   1. LM forward (causal, no memory) — batch 1 and 16
@@ -19,11 +19,13 @@ import torch.nn.functional as F
 
 from config import ModelConfig
 from model import ANT
-from train_micro import (
+from data import (
     VOCAB, VOCAB_SIZE, tokenize, detokenize,
-    encode_sentence_frozen, sliding_lm_encode,
-    generate_dataset, tag_passage,
+    generate_dataset, tag_passage, tag_text,
+    generate_shell_texts, load_wikipedia_sentences,
+    TextLMDataset,
 )
+from train import encode_frozen, sliding_window_encode
 
 
 def timer(fn, warmup=5, iters=50):
@@ -103,7 +105,7 @@ def bench_memory_encode(model, device, passage_len, batch_size, warmup, iters):
 
     def fn():
         with torch.no_grad():
-            encode_sentence_frozen(model, passages, device)
+            encode_frozen(model, passages, device)
 
     times = timer(fn, warmup, iters)
     total_tokens = batch_size * passage_len
@@ -115,10 +117,6 @@ def bench_training_step(model, device, batch_size, warmup, iters,
                         window_size=16, num_passes=4):
     """Full multitask training step: LM forward + memory encode + sliding window + backward."""
     import torch.nn.functional as F
-    from train_micro import (
-        generate_shell_texts, load_wikipedia_sentences,
-        TextLMDataset, tag_text
-    )
     from torch.utils.data import DataLoader
 
     pad = VOCAB["<pad>"]
@@ -181,10 +179,10 @@ def bench_training_step(model, device, batch_size, warmup, iters,
 
         train_model.eval()
         with torch.no_grad():
-            mk, mv, mm = encode_sentence_frozen(train_model, p_t, device)
+            mk, mv, mm = encode_frozen(train_model, p_t, device)
         train_model.train()
 
-        qa_hidden = sliding_lm_encode(
+        qa_hidden = sliding_window_encode(
             train_model, q_t, window_size, num_passes,
             mem_keys=mk, mem_vals=mv, mem_mask=mm,
         )
@@ -239,8 +237,8 @@ def bench_qa_inference(model, device, batch_size, warmup, iters, window_size=16,
 
     def fn():
         with torch.no_grad():
-            mk, mv, mm = encode_sentence_frozen(model, p_tensor, device)
-            hidden = sliding_lm_encode(model, i_tensor, window_size, num_passes,
+            mk, mv, mm = encode_frozen(model, p_tensor, device)
+            hidden = sliding_window_encode(model, i_tensor, window_size, num_passes,
                                        mem_keys=mk, mem_vals=mv, mem_mask=mm)
             F.linear(hidden, model.embed.weight)
 
@@ -381,8 +379,8 @@ def main():
 
     def qa_one():
         with torch.no_grad():
-            mk, mv, mm = encode_sentence_frozen(model, p_t, device)
-            h = sliding_lm_encode(model, i_t, 16, 4, mem_keys=mk, mem_vals=mv, mem_mask=mm)
+            mk, mv, mm = encode_frozen(model, p_t, device)
+            h = sliding_window_encode(model, i_t, 16, 4, mem_keys=mk, mem_vals=mv, mem_mask=mm)
             F.linear(h, model.embed.weight)
 
     qa_times = timer(qa_one, W, I)
@@ -392,7 +390,7 @@ def main():
     # Memory encode latency
     def enc_one():
         with torch.no_grad():
-            encode_sentence_frozen(model, p_t, device)
+            encode_frozen(model, p_t, device)
 
     enc_times = timer(enc_one, W, I)
     med_enc = statistics.median(enc_times) * 1000

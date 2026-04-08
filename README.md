@@ -48,14 +48,14 @@ answers questions, and holds conversations.
 ```bash
 pip install -r requirements.txt
 
-# Train (M4/MPS overnight)
-PYTHONUNBUFFERED=1 python3 train_overnight.py 2>&1 | tee training.log
+# Train
+python3 train.py 2>&1 | tee training.log
 
 # Train (A100 GPU, Colab)
 # Open train_colab.ipynb
 
 # Interactive chat
-python3 chat.py --checkpoint checkpoints/overnight/checkpoint_best.pt
+python3 inference.py
 ```
 
 ## Architecture
@@ -145,10 +145,10 @@ Causal sliding window with multi-pass refinement:
 config.py           ModelConfig (937K) + MemoryConfig
 model.py            ANT transformer: AddrNet, MemoryAttention, tag system
 memory.py           HierarchicalTrie: binary serialization, EMA write, batch read
-train_micro.py      Training pipeline: data gen, sliding window, curriculum
-train_overnight.py  M4 MPS overnight training wrapper
+data.py             Data pipelines: tokenizer, QA/shell/wiki/chat generators
+train.py            Training: Phase A/B/C curriculum, trie read/write bridge
+inference.py        Terminal chat: duplex streaming, per-token trie read/write
 train_colab.ipynb   A100 GPU training notebook
-chat.py             Terminal chat interface (duplex streaming)
 model_mlx.py        Apple Silicon MLX inference port
 benchmark.py        Performance benchmarks
 ```
