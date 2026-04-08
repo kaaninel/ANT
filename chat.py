@@ -36,7 +36,7 @@ from model import ANT, StaticKVCache
 from train_micro import (
     VOCAB, VOCAB_SIZE, ID2WORD, PAD_ID, BOS_ID, EOS_ID, ANS_ID,
     tokenize, detokenize,
-    encode_sentence_frozen, sliding_lm_encode,
+    encode_sentence_frozen, sliding_lm_encode, sliding_generate,
     tag_text, tag_passage, _TAG_REGISTRY, _DOMAIN_MAP,
 )
 
@@ -178,88 +178,50 @@ def sample_next(logits, generated, temperature=0.8, top_k=50, top_p=0.9,
 
 @torch.no_grad()
 def generate(model, cfg, prompt_ids, device, callback=None,
-             max_new_tokens=200, temperature=0.8, top_k=50, top_p=0.9,
+             max_new_tokens=2048, temperature=0.8, top_k=50, top_p=0.9,
              repetition_penalty=1.2,
              mem_keys=None, mem_vals=None, mem_mask=None,
-             use_sliding=False, window_size=8, num_passes=4):
-    """Generate tokens and call callback(token_id) for each one.
+             window_size=8, num_passes=4,
+             # kept for API compatibility — always sliding, this param ignored
+             use_sliding=True):
+    """Generate tokens via causal sliding window and call callback(token_id) for each.
 
-    Returns the full list of generated token IDs.
+    ANT is trained exclusively with causal sliding windows — there is no
+    non-sliding path. Output length is bounded only by max_new_tokens;
+    the rolling context buffer makes generation O(1) per token.
+
+    Returns the list of newly generated token IDs (not including prompt).
     """
     model.eval()
 
-    if use_sliding:
-        return _generate_sliding(
-            model, cfg, prompt_ids, device, callback,
-            max_new_tokens, temperature, top_k, top_p, repetition_penalty,
-            mem_keys, mem_vals, mem_mask, window_size, num_passes)
+    # Stop if the model starts generating a new tag line (role hallucination)
+    _STOP_STRINGS = ["\nlocalhost/", "\nkaaninel@", "\nant@", "\nuser@"]
 
-    input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    B, T = input_ids.shape
+    generated_so_far = []
 
-    # Cap max_new_tokens to stay within RoPE buffer
-    rope_len = model.rope_cos.shape[0]
-    max_new_tokens = min(max_new_tokens, rope_len - T - 1)
-    if max_new_tokens <= 0:
-        return []
+    def _cb(tok):
+        if tok != EOS_ID:
+            generated_so_far.append(tok)
+            if callback:
+                callback(tok)
 
-    cache = model.make_cache(B, max_seq=T + max_new_tokens, device=device)
-
-    logits, _, cache = model(input_ids, kv_cache=cache, cache_position=0,
-                             memory_keys=mem_keys, memory_values=mem_vals,
-                             memory_mask=mem_mask)
-
-    generated = list(prompt_ids)
-    pos = T
-
-    for _ in range(max_new_tokens):
-        next_token = sample_next(logits, generated, temperature, top_k, top_p,
-                                 repetition_penalty)
-        generated.append(next_token)
-
-        if next_token == EOS_ID:
-            break
-
-        if callback:
-            callback(next_token)
-
-        next_input = torch.tensor([[next_token]], dtype=torch.long, device=device)
-        logits, _, cache = model(next_input, kv_cache=cache, cache_position=pos,
-                                 memory_keys=mem_keys, memory_values=mem_vals,
-                                 memory_mask=mem_mask)
-        pos += 1
-
-    return generated[len(prompt_ids):]
-
-
-@torch.no_grad()
-def _generate_sliding(model, cfg, prompt_ids, device, callback,
-                      max_new_tokens, temperature, top_k, top_p,
-                      repetition_penalty,
-                      mem_keys, mem_vals, mem_mask,
-                      window_size, num_passes):
-    """Sliding window generation with causal per-window encoding."""
-    generated = list(prompt_ids)
-
-    for _ in range(max_new_tokens):
-        input_tensor = torch.tensor([generated], dtype=torch.long, device=device)
-        hidden = sliding_lm_encode(
-            model, input_tensor, window_size, num_passes,
-            mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask,
-            causal=True)
-        logits = F.linear(hidden, model.embed.weight)
-
-        next_token = sample_next(logits, generated, temperature, top_k, top_p,
-                                 repetition_penalty)
-        generated.append(next_token)
-
-        if next_token == EOS_ID:
-            break
-
-        if callback:
-            callback(next_token)
-
-    return generated[len(prompt_ids):]
+    all_ids = sliding_generate(
+        model, prompt_ids,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        repetition_penalty=repetition_penalty,
+        window_size=window_size,
+        num_passes=num_passes,
+        mem_keys=mem_keys,
+        mem_vals=mem_vals,
+        mem_mask=mem_mask,
+        stop_token=EOS_ID,
+        stop_strings=_STOP_STRINGS,
+        callback=_cb,
+    )
+    return all_ids[len(prompt_ids):]
 
 
 def encode_passage_to_memory(model, passage_text, device, tagged=False):
@@ -347,11 +309,11 @@ HELP_TEXT = f"""
   /help         Show this help
   /quit         Exit
   /config       Show current settings
-  /temp <f>     Set temperature (0=greedy, default=0.8)
+  /temp <f>     Set temperature (0=greedy, default=0.7)
   /topk <n>     Set top-k (default=50)
   /topp <f>     Set top-p (default=0.9)
-  /maxlen <n>   Set max generation length (default=200)
-  /rep <f>      Set repetition penalty (default=1.2)
+  /maxlen <n>   Set max generation length (default=2048, no hard cap)
+  /rep <f>      Set repetition penalty (default=1.3)
   /remember <t> Store passage in memory
   /forget       Clear memory
   /memory       Show stored passages
@@ -359,7 +321,11 @@ HELP_TEXT = f"""
   /context      Show conversation context (last N events)
   /clear        Clear conversation context
   /agent <name> Switch agent persona
-  /sliding      Toggle sliding window mode
+
+{_BOLD}Architecture:{_RESET}
+  Causal sliding window + memory cross-attention. Your messages are encoded
+  into memory for cross-attention access. Factual passages (via /remember)
+  are also stored in memory. Output length is unbounded.
 """
 
 
@@ -377,19 +343,19 @@ class TerminalCanvas:
         self.window_size = window_size
         self.num_passes = num_passes
         self.tagged = tagged
-        self.use_sliding = (ckpt.get("mode") == "sliding_lm"
-                            or ckpt.get("mode") == "multitask")
 
         # Sampling params
-        self.temperature = 0.8
+        self.temperature = 0.7
         self.top_k = 50
         self.top_p = 0.9
-        self.max_tokens = 200
-        self.rep_penalty = 1.2
+        self.max_tokens = 2048   # unlimited output — sliding window handles any length
+        self.rep_penalty = 1.3
 
         # Conversation context (list of tagged event strings)
+        # Keep recent turns for prompt construction; sliding_generate's rolling
+        # buffer handles generation context. 4096 bytes ≈ 20 conversation turns.
         self.context: list[str] = []
-        self.max_context_bytes = cfg.max_seq_len * 3  # keep last N bytes of context
+        self.max_context_bytes = 4096
 
         # Memory
         self.passages: list[str] = []
@@ -430,28 +396,61 @@ class TerminalCanvas:
     def _generate_response(self, prompt_suffix="", qa_mode=False):
         """Generate agent response given current context.
 
+        Always uses causal sliding window — ANT has no non-sliding path.
         qa_mode: if True, uses [BOS, ANS] + question format (matching training).
+
+        For chat mode, the user's recent messages are encoded into memory
+        via cross-attention, solving the receptive field limitation. The
+        sliding window handles local coherence; memory provides global
+        understanding of what was asked.
         """
         agent_tag = self._agent_tag()
 
         if qa_mode:
-            # QA format from training: [BOS, ANS, question_ids...]
-            # Question is the last context entry (untagged)
             last = self.context[-1] if self.context else ""
-            # Strip tag if present
             m = _TAG_RE.match(last)
             question = last[m.end():] if m else last
             prompt_ids = [BOS_ID, ANS_ID] + tokenize(question)
-            # QA also uses sliding — unified architecture
-            use_sliding = self.use_sliding
+            # QA uses passage memory (from /mem add)
+            mem_keys = self.mem_keys
+            mem_vals = self.mem_vals
+            mem_mask = self.mem_mask
         else:
-            full_context = "\n".join(self.context) + "\n" + agent_tag + prompt_suffix
-            prompt_ids = [BOS_ID] + tokenize(full_context)
-            use_sliding = self.use_sliding
+            # Chat mode: encode recent user messages into memory
+            # Extract user content from the last few context turns
+            user_contents = []
+            for line in self.context[-6:]:
+                m = _TAG_RE.match(line)
+                if m and '/user/' in line[:60]:
+                    content = line[m.end():]
+                    if content.strip():
+                        user_contents.append(content.strip())
+            chat_context = ". ".join(user_contents) if user_contents else "hello"
+
+            # Encode into memory for cross-attention
+            # Truncate to 190 tokens: encode_sentence_frozen uses model()
+            # which has RoPE precomputed for 203 positions max
+            ctx_tok = tokenize(chat_context)[:190]
+            ctx_ids = torch.tensor([ctx_tok],
+                                   dtype=torch.long, device=self.device)
+            with torch.no_grad():
+                chat_mk, chat_mv, chat_mm = encode_sentence_frozen(
+                    self.model, ctx_ids, self.device)
+
+            # Merge with any passage memory (from /mem add)
+            if self.mem_keys is not None:
+                mem_keys = torch.cat([self.mem_keys, chat_mk], dim=1)
+                mem_vals = torch.cat([self.mem_vals, chat_mv], dim=1)
+                mem_mask = torch.cat([self.mem_mask, chat_mm], dim=1)
+            else:
+                mem_keys, mem_vals, mem_mask = chat_mk, chat_mv, chat_mm
+
+            # Prompt: agent tag only (user question is in memory)
+            prompt_ids = [BOS_ID] + tokenize(agent_tag + prompt_suffix)
 
         # Print agent label before streaming content
         agent_label = format_tagged_line(agent_tag + "...")
-        agent_label = agent_label.rsplit("...", 1)[0]  # strip placeholder
+        agent_label = agent_label.rsplit("...", 1)[0]
         print(agent_label, end='', flush=True)
 
         renderer = StreamRenderer()
@@ -464,9 +463,8 @@ class TerminalCanvas:
             temperature=self.temperature,
             top_k=self.top_k, top_p=self.top_p,
             repetition_penalty=self.rep_penalty,
-            mem_keys=self.mem_keys, mem_vals=self.mem_vals,
-            mem_mask=self.mem_mask,
-            use_sliding=use_sliding,
+            mem_keys=mem_keys, mem_vals=mem_vals,
+            mem_mask=mem_mask,
             window_size=self.window_size,
             num_passes=self.num_passes)
         renderer.finish()
@@ -523,15 +521,14 @@ class TerminalCanvas:
             print(f"  Host:        {self.host}")
             print(f"  User:        {self.username}")
             print(f"  Agent:       {self.agent}")
-            print(f"  Sliding:     {self.use_sliding}")
+            print(f"  Mode:        sliding window (always on)")
+            print(f"  Window:      {self.window_size}  Passes: {self.num_passes}")
             print(f"  Temperature: {self.temperature}")
             print(f"  Top-K:       {self.top_k}")
             print(f"  Top-P:       {self.top_p}")
-            print(f"  Max tokens:  {self.max_tokens}")
+            print(f"  Max tokens:  {self.max_tokens}  (no hard cap)")
             print(f"  Rep penalty: {self.rep_penalty}")
             print(f"  Tagged:      {self.tagged}")
-            print(f"  Window:      {self.window_size}")
-            print(f"  Passes:      {self.num_passes}")
             print(f"  Context:     {len(self.context)} events")
             print(f"  CWD:         {self.cwd}")
             print(f"  Passages:    {len(self.passages)}")
@@ -617,8 +614,7 @@ class TerminalCanvas:
             else:
                 print(f"  Current agent: {self.agent}")
         elif cmd == "/sliding":
-            self.use_sliding = not self.use_sliding
-            print(f"  Sliding window → {'ON' if self.use_sliding else 'OFF'}")
+            print("  Sliding window is always enabled — ANT has no non-sliding path.")
         else:
             print(f"  Unknown command: {cmd}. Type /help for commands.")
 
@@ -697,6 +693,7 @@ def main():
     ckpt_path = args.checkpoint
     if ckpt_path is None:
         candidates = [
+            "checkpoints/overnight/checkpoint_best.pt",
             "checkpoints/chat/best_model.pt",
             "checkpoints/tag_test/multitask/best_multitask.pt",
             "checkpoints/local_test/multitask/best_multitask.pt",
@@ -719,7 +716,9 @@ def main():
 
     model, cfg, ckpt = load_model(ckpt_path, device)
     window_size = ckpt.get("window_size", cfg.chunk_size)
-    num_passes = ckpt.get("num_passes", 4)
+    # Respect the checkpoint's num_passes — the model was trained with a specific
+    # pass count and using a different value produces garbage outputs.
+    num_passes = ckpt.get("num_passes", 1)
 
     canvas = TerminalCanvas(
         model, cfg, ckpt, device,
@@ -728,7 +727,7 @@ def main():
         tagged=not args.no_tags)
 
     print(f"  {_DIM}Device: {device} | Agent: {args.agent} | "
-          f"Sliding: {canvas.use_sliding}{_RESET}")
+          f"Window: W={window_size} passes={num_passes} | Memory-based chat{_RESET}")
     print(f"  {_DIM}Type /help for commands, !cmd for shell{_RESET}\n")
 
     canvas.run()

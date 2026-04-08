@@ -1,4 +1,4 @@
-"""MLX port of ANT (Addressable Neural Transformer) — optimised for autoregressive generation.
+"""MLX port of ANT — optimised for autoregressive generation.
 
 Apple Silicon unified-memory, lazy evaluation, and fused kernels
 eliminate the per-step dispatch overhead that bottlenecks PyTorch/MPS.

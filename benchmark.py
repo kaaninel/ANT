@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Performance benchmarks for ANT (828K param Addressable Neural Transformer).
+"""Performance benchmarks for ANT (828K params).
 
 Measures tokens/second for:
   1. LM forward (causal, no memory) — batch 1 and 16

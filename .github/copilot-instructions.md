@@ -1,8 +1,8 @@
-# Copilot Instructions — ANT (Addressable Neural Transformer)
+# Copilot Instructions — ANT
 
 ## What This Is
 
-ANT is an 828K parameter looping transformer with persistent external memory. Research prototype — not a standard ML training repo. The entire training pipeline (tokenizer, datasets, encoders, training loops, evaluation) lives in a single file (`train_micro.py`, ~3000 lines).
+ANT is an 828K parameter byte-level transformer with persistent external memory and memory-based chat via cross-attention. Research prototype — not a standard ML training repo. The entire training pipeline (tokenizer, datasets, encoders, training loops, evaluation) lives in a single file (`train_micro.py`, ~4000 lines).
 
 ## Running
 
@@ -29,7 +29,7 @@ There are no linters, formatters, or test suites configured.
 
 ```
 config.py          ModelConfig (828K) + MemoryConfig
-model.py           ANT — the transformer itself (Addressable Neural Transformer)
+model.py           ANT — the transformer with cross-attention memory
 memory.py          TrieIndex persistent memory system (int8 vectors on disk)
 train_micro.py     Everything else: tokenizer, data gen, encoders, training, eval
 ```

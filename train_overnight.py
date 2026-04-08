@@ -32,23 +32,26 @@ HF_CHECKPOINT = (
 OUTPUT_DIR = "checkpoints/overnight"
 DEVICE = "mps"  # M4 MacBook Air
 
-# Data — keep small for Phase 3 to avoid RAM explosion
-# Phase 3 runs 3 forward passes/step (LM+QA+Chat) — data size less important
-N_WIKI = 50_000   # reduced from 200K — enough variety, saves RAM
-N_SHELL = 5_000
-N_QA = 20_000     # reduced from 50K — QA already solved at 100%
-N_CHAT = 10_000
+# Data — Phase 3 chat focus (memory-based: user→memory, agent→sliding window)
+# More chat data since the model now properly accesses questions via memory
+N_WIKI = 5_000    # minimal LM regularization (English fluency)
+N_SHELL = 1_000
+N_QA = 5_000      # maintain memory cross-attention for facts
+N_CHAT = 30_000   # heavy chat — model learns conversational response
 
-# Training — Phase 3 only (QA already 100%, LM at 1.53 from overnight run)
-# Load the best local checkpoint and just do chat + refinement
-PHASE1_STEPS = 0        # skip — LM already solid
-PHASE2_STEPS = 0        # skip — QA already at 100%
-PHASE3_STEPS = 2_000   # ~2h of LM+QA+Chat refinement on M4
+# Use real HF conversational data (ultrachat/smoltalk) instead of synthetic pairs
+# These teach HOW to respond without encoding facts into weights
+USE_HF_CHAT = True
 
-BATCH_SIZE = 32  # safe for MPS RAM
+# Training — Phase 1/2 warmup to adapt to passes=4, then Phase 3 chat
+PHASE1_STEPS = 1_000    # LM warmup — adapt to multi-pass hidden states
+PHASE2_STEPS = 500      # QA warmup — re-establish memory cross-attention
+PHASE3_STEPS = 8_000    # Chat focus with memory-encoded user messages
+
+BATCH_SIZE = 8    # smaller batch for passes=4 (4× more compute per step)
 GRAD_ACCUM = 1
 WINDOW_SIZE = 8
-NUM_PASSES = 2  # 2 passes in Phase 3 — halves compute, still good quality
+NUM_PASSES = 4    # KEY: 4 passes gives 17-byte receptive field (vs 5 with passes=1)
 STRIDE = 1  # MUST be 1 for correct LM training (stride>1 skips positions)
 EVAL_INTERVAL = 500
 
@@ -109,6 +112,7 @@ def main():
         VOCAB_SIZE,
         log_model_summary,
         train_chat,
+        load_hf_chat_data,
     )
 
     cfg = ModelConfig()
@@ -175,6 +179,7 @@ def main():
         n_chat=N_CHAT,
         use_bf16=False,  # MPS doesn't support BF16 well
         use_compile=False,  # torch.compile unreliable on MPS
+        use_hf_chat=USE_HF_CHAT,
         hf_repo=HF_REPO,
         hf_upload_interval=2000,
     )

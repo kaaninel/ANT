@@ -1,0 +1,72 @@
+  ANT overnight script starting...
+======================================================================
+  ANT — Overnight Training (M4 MPS)
+======================================================================
+  Device:     mps
+  HF source:  kaaninel/ANT/checkpoints/chat/checkpoint_latest.pt
+  Output:     checkpoints/overnight
+  Phases:     P1=1000 P2=500 P3=8000
+  Total:      9,500 steps
+  Data:       wiki=5,000 shell=1,000 qa=5,000 chat=30,000
+  Window:     W=8 passes=4 stride=1
+  Batch:      8 × 1 = 8 effective
+  Est time:   ~3.8h at 0.7 it/s
+
+
+  ┌─── Model Architecture ───
+  │ d_model=128  n_heads=4  head_dim=32
+  │ n_layers=4  ffn_dim=256  max_seq=192
+  │ mem_slots=9  max_memory_slots=9  addr_heads=3  addr_dim=8
+  │ params: 828,306 total (0.83M), 828,306 trainable
+  │ breakdown: embed=32,768  layers=787,984  heads=3,330  lm_head=0
+  └────────────────────
+
+  Loading weights from checkpoints/overnight/checkpoint_best.pt...
+  ✓ Loaded (step=1500, QA=0.0%)
+
+
+============================================================
+  ANT — Unified Causal Sliding Window Training
+============================================================
+  Window size:     8
+  Stride:          1
+  Num passes:      4
+  Batch size:      8 (micro) × 1 accum = 8 effective
+  BF16:            False
+  Compile:         False
+  Phase 1 (LM):    1000 steps
+  Phase 2 (LM+QA): 500 steps
+  Phase 3 (all):   8000 steps
+  Total:           9500 steps
+  Output:          checkpoints/overnight
+
+  Loading data...
+  Loading cached Wikipedia sentences from data_cache/wiki_sentences_5000.txt
+    Wikipedia: 5000 sentences
+    Shell:     1000 commands
+  Loading cached HF chat data from data_cache/hf_chat_30000_600b.txt
+    Chat:      72921 pairs
+    QA train:  5000 examples
+    QA val:    500 examples
+    LM dataset:   6000 samples
+    Chat dataset: 0 samples
+Traceback (most recent call last):
+  File "/Users/kaaninel/Workspace/LatentController/train_overnight.py", line 195, in <module>
+    main()
+    ~~~~^^
+  File "/Users/kaaninel/Workspace/LatentController/train_overnight.py", line 161, in main
+    best_acc = train_chat(
+        model,
+    ...<21 lines>...
+        hf_upload_interval=2000,
+    )
+  File "/Users/kaaninel/Workspace/LatentController/train_micro.py", line 3609, in train_chat
+    chat_loader = DataLoader(chat_ds, batch_size=batch_size, shuffle=True, drop_last=True,
+                             collate_fn=chat_memory_collate_fn)
+  File "/Users/kaaninel/Workspace/LatentController/.venv/lib/python3.14/site-packages/torch/utils/data/dataloader.py", line 394, in __init__
+    sampler = RandomSampler(dataset, generator=generator)  # type: ignore[arg-type]
+  File "/Users/kaaninel/Workspace/LatentController/.venv/lib/python3.14/site-packages/torch/utils/data/sampler.py", line 149, in __init__
+    raise ValueError(
+        f"num_samples should be a positive integer value, but got num_samples={self.num_samples}"
+    )
+ValueError: num_samples should be a positive integer value, but got num_samples=0

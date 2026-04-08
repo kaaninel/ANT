@@ -1,0 +1,57 @@
+  ANT overnight script starting...
+======================================================================
+  ANT — Overnight Training (M4 MPS)
+======================================================================
+  Device:     mps
+  HF source:  kaaninel/ANT/checkpoints/chat/checkpoint_latest.pt
+  Output:     checkpoints/overnight
+  Phases:     P1=0 P2=0 P3=2000
+  Total:      2,000 steps
+  Data:       wiki=50,000 shell=5,000 qa=20,000 chat=20,000
+  Window:     W=8 passes=2 stride=1
+  Batch:      32 × 1 = 32 effective
+  Est time:   ~0.8h at 0.7 it/s
+
+
+  ┌─── Model Architecture ───
+  │ d_model=128  n_heads=4  head_dim=32
+  │ n_layers=4  ffn_dim=256  max_seq=192
+  │ mem_slots=9  max_memory_slots=9  addr_heads=3  addr_dim=8
+  │ params: 828,306 total (0.83M), 828,306 trainable
+  │ breakdown: embed=32,768  layers=787,984  heads=3,330  lm_head=0
+  └────────────────────
+
+  Loading weights from checkpoints/overnight/checkpoint_best.pt...
+  ✓ Loaded (step=2000, QA=0.0%)
+
+
+============================================================
+  ANT — Unified Causal Sliding Window Training
+============================================================
+  Window size:     8
+  Stride:          1
+  Num passes:      2
+  Batch size:      32 (micro) × 1 accum = 32 effective
+  BF16:            False
+  Compile:         False
+  Phase 1 (LM):    0 steps
+  Phase 2 (LM+QA): 0 steps
+  Phase 3 (all):   2000 steps
+  Total:           2000 steps
+  Output:          checkpoints/overnight
+
+  Loading data...
+  Loading cached Wikipedia sentences from data_cache/wiki_sentences_50000.txt
+    Wikipedia: 50000 sentences
+    Shell:     5000 commands
+  Loading cached HF chat data from data_cache/hf_chat_20000.txt
+    Chat:      88807 pairs
+    QA train:  20000 examples
+    QA val:    500 examples
+    LM dataset:   55000 samples
+    Chat dataset: 88807 samples
+
+  ────────────────────────────────────────────────────────
+  Training started at 13:30:33
+  ────────────────────────────────────────────────────────
+  [P3     1/2000] loss=1.1275 lm=1.7481 qa=0.0014 chat=1.6143 gnorm=1.75 lr=3.3e-07 spd=0.0it/s [40s / ETA 79144s]

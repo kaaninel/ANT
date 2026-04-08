@@ -391,7 +391,7 @@ class TransformerBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 class ANT(nn.Module):
-    """Addressable Neural Transformer — 828K param looping transformer with external memory."""
+    """ANT — 828K param looping transformer with persistent external memory."""
     def __init__(self, cfg: ModelConfig, use_checkpoint: bool = True):
         super().__init__()
         self.cfg = cfg

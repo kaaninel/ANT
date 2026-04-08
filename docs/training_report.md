@@ -1,4 +1,4 @@
-# ANT — Markdown + Shell Training: Viability Report
+# ANT — Training Report
 
 ## Current Approach
 

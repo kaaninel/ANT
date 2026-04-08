@@ -1,0 +1,877 @@
+  ANT overnight script starting...
+======================================================================
+  ANT — Overnight Training (M4 MPS)
+======================================================================
+  Device:     mps
+  HF source:  kaaninel/ANT/checkpoints/chat/checkpoint_latest.pt
+  Output:     checkpoints/overnight
+  Phases:     P1=5000 P2=10000 P3=3000
+  Total:      18,000 steps
+  Data:       wiki=200,000 shell=10,000 qa=50,000 chat=10,000
+  Window:     W=8 passes=4 stride=1
+  Batch:      32 × 1 = 32 effective
+  Est time:   ~7.1h at 0.7 it/s
+
+
+  ┌─── Model Architecture ───
+  │ d_model=128  n_heads=4  head_dim=32
+  │ n_layers=4  ffn_dim=256  max_seq=192
+  │ mem_slots=9  max_memory_slots=9  addr_heads=3  addr_dim=8
+  │ params: 828,306 total (0.83M), 828,306 trainable
+  │ breakdown: embed=32,768  layers=787,984  heads=3,330  lm_head=0
+  └────────────────────
+
+  Loading weights from checkpoints/overnight/checkpoint_colab_best.pt...
+  (stripped torch.compile prefix)
+  ✓ Loaded (step=5000, QA=0.0%)
+
+
+============================================================
+  ANT — Unified Causal Sliding Window Training
+============================================================
+  Window size:     8
+  Stride:          1
+  Num passes:      4
+  Batch size:      32 (micro) × 1 accum = 32 effective
+  BF16:            False
+  Compile:         False
+  Phase 1 (LM):    5000 steps
+  Phase 2 (LM+QA): 10000 steps
+  Phase 3 (all):   3000 steps
+  Total:           18000 steps
+  Output:          checkpoints/overnight
+
+  Loading data...
+  Loading cached Wikipedia sentences from data_cache/wiki_sentences_200000.txt
+    Wikipedia: 200000 sentences
+    Shell:     10000 commands
+    Chat:      10000 pairs
+    QA train:  50000 examples
+    QA val:    500 examples
+    LM dataset:   210000 samples
+    Chat dataset: 10000 samples
+
+  ────────────────────────────────────────────────────────
+  Training started at 01:21:32
+  ────────────────────────────────────────────────────────
+  [P1     1/18000] loss=2.5544 lm=2.5544 gnorm=17.40 lr=1.0e-06 spd=0.0it/s [2s / ETA 33504s]
+  [P1    25/18000] loss=2.2782 lm=2.2782 gnorm=2.67 lr=2.5e-05 spd=0.6it/s [43s / ETA 31095s]
+  [P1    50/18000] loss=2.3261 lm=2.3261 gnorm=2.90 lr=5.0e-05 spd=0.6it/s [87s / ETA 31223s]
+  [P1    75/18000] loss=2.1420 lm=2.1420 gnorm=2.54 lr=7.5e-05 spd=0.6it/s [131s / ETA 31286s]
+  [P1   100/18000] loss=2.1461 lm=2.1461 gnorm=3.45 lr=1.0e-04 spd=0.6it/s [175s / ETA 31296s]
+  [P1   125/18000] loss=2.1443 lm=2.1443 gnorm=4.07 lr=1.3e-04 spd=0.6it/s [219s / ETA 31377s]
+  [P1   150/18000] loss=2.1213 lm=2.1213 gnorm=3.17 lr=1.5e-04 spd=0.5it/s [266s / ETA 31672s]
+  [P1   175/18000] loss=2.1243 lm=2.1243 gnorm=3.66 lr=1.8e-04 spd=0.5it/s [319s / ETA 32508s]
+  [P1   200/18000] loss=2.1029 lm=2.1029 gnorm=3.27 lr=2.0e-04 spd=0.5it/s [369s / ETA 32884s]
+  [P1   225/18000] loss=2.0960 lm=2.0960 gnorm=3.42 lr=2.0e-04 spd=0.5it/s [423s / ETA 33379s]
+  [P1   250/18000] loss=2.0667 lm=2.0667 gnorm=2.77 lr=2.0e-04 spd=0.5it/s [471s / ETA 33409s]
+  [P1   275/18000] loss=2.0794 lm=2.0794 gnorm=3.32 lr=2.0e-04 spd=0.5it/s [521s / ETA 33563s]
+  [P1   300/18000] loss=2.1384 lm=2.1384 gnorm=3.71 lr=2.0e-04 spd=0.5it/s [571s / ETA 33684s]
+  [P1   325/18000] loss=2.0310 lm=2.0310 gnorm=2.34 lr=2.0e-04 spd=0.5it/s [621s / ETA 33777s]
+  [P1   350/18000] loss=2.0552 lm=2.0552 gnorm=3.19 lr=2.0e-04 spd=0.5it/s [672s / ETA 33882s]
+  [P1   375/18000] loss=2.0187 lm=2.0187 gnorm=4.03 lr=2.0e-04 spd=0.5it/s [726s / ETA 34118s]
+  [P1   400/18000] loss=1.9829 lm=1.9829 gnorm=3.57 lr=2.0e-04 spd=0.5it/s [777s / ETA 34174s]
+  [P1   425/18000] loss=2.0266 lm=2.0266 gnorm=3.74 lr=2.0e-04 spd=0.5it/s [827s / ETA 34205s]
+  [P1   450/18000] loss=2.0028 lm=2.0028 gnorm=3.29 lr=2.0e-04 spd=0.5it/s [878s / ETA 34228s]
+  [P1   475/18000] loss=2.0204 lm=2.0204 gnorm=3.91 lr=2.0e-04 spd=0.5it/s [930s / ETA 34323s]
+  [P1   500/18000] loss=2.0267 lm=2.0267 gnorm=2.61 lr=2.0e-04 spd=0.5it/s [983s / ETA 34395s]
+
+  ╔══ EVAL @ step 500 (Phase 1) ══
+  ║ LM loss: 2.0267
+  ║ Sample: The become of the Brasing to the for and is methor in the may with reating and f
+  ╚════════════════════════════════════════
+
+  [P1   525/18000] loss=2.2610 lm=2.2610 gnorm=3.23 lr=2.0e-04 spd=0.5it/s [1036s / ETA 34492s]
+  [P1   550/18000] loss=2.0001 lm=2.0001 gnorm=2.76 lr=2.0e-04 spd=0.5it/s [1089s / ETA 34553s]
+  [P1   575/18000] loss=1.9124 lm=1.9124 gnorm=2.86 lr=2.0e-04 spd=0.5it/s [1142s / ETA 34607s]
+  [P1   600/18000] loss=1.9541 lm=1.9541 gnorm=2.73 lr=2.0e-04 spd=0.5it/s [1195s / ETA 34644s]
+  [P1   625/18000] loss=1.9208 lm=1.9208 gnorm=2.85 lr=2.0e-04 spd=0.5it/s [1247s / ETA 34674s]
+  [P1   650/18000] loss=1.9323 lm=1.9323 gnorm=2.86 lr=2.0e-04 spd=0.5it/s [1301s / ETA 34732s]
+  [P1   675/18000] loss=2.0035 lm=2.0035 gnorm=2.90 lr=2.0e-04 spd=0.5it/s [1355s / ETA 34780s]
+  [P1   700/18000] loss=1.8947 lm=1.8947 gnorm=2.58 lr=1.9e-04 spd=0.5it/s [1409s / ETA 34814s]
+  [P1   725/18000] loss=1.9511 lm=1.9511 gnorm=2.77 lr=1.9e-04 spd=0.5it/s [1462s / ETA 34844s]
+  [P1   750/18000] loss=2.1080 lm=2.1080 gnorm=2.61 lr=1.9e-04 spd=0.5it/s [1516s / ETA 34873s]
+  [P1   775/18000] loss=1.9375 lm=1.9375 gnorm=2.83 lr=1.9e-04 spd=0.5it/s [1571s / ETA 34907s]
+  [P1   800/18000] loss=1.8503 lm=1.8503 gnorm=2.30 lr=1.9e-04 spd=0.5it/s [1625s / ETA 34939s]
+  [P1   825/18000] loss=1.7920 lm=1.7920 gnorm=3.34 lr=1.9e-04 spd=0.5it/s [1680s / ETA 34964s]
+  [P1   850/18000] loss=2.0129 lm=2.0129 gnorm=3.33 lr=1.9e-04 spd=0.5it/s [1734s / ETA 34981s]
+  [P1   875/18000] loss=1.9329 lm=1.9329 gnorm=3.04 lr=1.9e-04 spd=0.5it/s [1788s / ETA 34994s]
+  [P1   900/18000] loss=1.8814 lm=1.8814 gnorm=3.86 lr=1.9e-04 spd=0.5it/s [1842s / ETA 34996s]
+  [P1   925/18000] loss=1.8724 lm=1.8724 gnorm=3.25 lr=1.9e-04 spd=0.5it/s [1897s / ETA 35008s]
+  [P1   950/18000] loss=1.8467 lm=1.8467 gnorm=3.54 lr=1.9e-04 spd=0.5it/s [1951s / ETA 35023s]
+  [P1   975/18000] loss=1.8592 lm=1.8592 gnorm=2.47 lr=1.9e-04 spd=0.5it/s [2007s / ETA 35040s]
+  [P1  1000/18000] loss=1.9269 lm=1.9269 gnorm=3.51 lr=1.9e-04 spd=0.5it/s [2062s / ETA 35051s]
+
+  ╔══ EVAL @ step 1000 (Phase 1) ══
+  ║ LM loss: 1.9269
+  ║ Sample: The adomict.
+  ╚════════════════════════════════════════
+
+  [P1  1025/18000] loss=1.8946 lm=1.8946 gnorm=2.20 lr=1.9e-04 spd=0.5it/s [2116s / ETA 35037s]
+  [P1  1050/18000] loss=1.8468 lm=1.8468 gnorm=2.57 lr=1.9e-04 spd=0.5it/s [2168s / ETA 34992s]
+  [P1  1075/18000] loss=1.8952 lm=1.8952 gnorm=2.78 lr=1.8e-04 spd=0.5it/s [2219s / ETA 34942s]
+  [P1  1100/18000] loss=1.8458 lm=1.8458 gnorm=2.89 lr=1.8e-04 spd=0.5it/s [2271s / ETA 34888s]
+  [P1  1125/18000] loss=1.8996 lm=1.8996 gnorm=2.55 lr=1.8e-04 spd=0.5it/s [2322s / ETA 34836s]
+  [P1  1150/18000] loss=1.9587 lm=1.9587 gnorm=2.98 lr=1.8e-04 spd=0.5it/s [2374s / ETA 34787s]
+  [P1  1175/18000] loss=1.9987 lm=1.9987 gnorm=3.17 lr=1.8e-04 spd=0.5it/s [2426s / ETA 34736s]
+  [P1  1200/18000] loss=1.9303 lm=1.9303 gnorm=3.15 lr=1.8e-04 spd=0.5it/s [2478s / ETA 34690s]
+  [P1  1225/18000] loss=1.7897 lm=1.7897 gnorm=2.56 lr=1.8e-04 spd=0.5it/s [2530s / ETA 34648s]
+  [P1  1250/18000] loss=1.8542 lm=1.8542 gnorm=2.46 lr=1.8e-04 spd=0.5it/s [2582s / ETA 34602s]
+  [P1  1275/18000] loss=1.8408 lm=1.8408 gnorm=2.57 lr=1.8e-04 spd=0.5it/s [2634s / ETA 34556s]
+  [P1  1300/18000] loss=1.8288 lm=1.8288 gnorm=3.05 lr=1.8e-04 spd=0.5it/s [2686s / ETA 34509s]
+  [P1  1325/18000] loss=1.9357 lm=1.9357 gnorm=2.67 lr=1.7e-04 spd=0.5it/s [2738s / ETA 34462s]
+  [P1  1350/18000] loss=1.8280 lm=1.8280 gnorm=2.59 lr=1.7e-04 spd=0.5it/s [2790s / ETA 34412s]
+  [P1  1375/18000] loss=1.8394 lm=1.8394 gnorm=2.57 lr=1.7e-04 spd=0.5it/s [2842s / ETA 34364s]
+  [P1  1400/18000] loss=1.9181 lm=1.9181 gnorm=2.88 lr=1.7e-04 spd=0.5it/s [2894s / ETA 34316s]
+  [P1  1425/18000] loss=1.8710 lm=1.8710 gnorm=2.29 lr=1.7e-04 spd=0.5it/s [2946s / ETA 34269s]
+  [P1  1450/18000] loss=1.7429 lm=1.7429 gnorm=2.58 lr=1.7e-04 spd=0.5it/s [2998s / ETA 34220s]
+  [P1  1475/18000] loss=1.8276 lm=1.8276 gnorm=2.56 lr=1.7e-04 spd=0.5it/s [3050s / ETA 34173s]
+  [P1  1500/18000] loss=1.8218 lm=1.8218 gnorm=2.25 lr=1.7e-04 spd=0.5it/s [3102s / ETA 34126s]
+
+  ╔══ EVAL @ step 1500 (Phase 1) ══
+  ║ LM loss: 1.8218
+  ║ Sample: The months served at the Botbard Mooria lest some seat the Allongess in and the 
+  ╚════════════════════════════════════════
+
+  [P1  1525/18000] loss=1.8394 lm=1.8394 gnorm=2.57 lr=1.7e-04 spd=0.5it/s [3155s / ETA 34087s]
+  [P1  1550/18000] loss=1.8422 lm=1.8422 gnorm=3.15 lr=1.6e-04 spd=0.5it/s [3207s / ETA 34039s]
+  [P1  1575/18000] loss=1.7601 lm=1.7601 gnorm=2.37 lr=1.6e-04 spd=0.5it/s [3259s / ETA 33990s]
+  [P1  1600/18000] loss=1.8159 lm=1.8159 gnorm=2.49 lr=1.6e-04 spd=0.5it/s [3311s / ETA 33941s]
+  [P1  1625/18000] loss=1.8880 lm=1.8880 gnorm=2.51 lr=1.6e-04 spd=0.5it/s [3363s / ETA 33890s]
+  [P1  1650/18000] loss=1.6952 lm=1.6952 gnorm=2.40 lr=1.6e-04 spd=0.5it/s [3415s / ETA 33840s]
+  [P1  1675/18000] loss=1.8186 lm=1.8186 gnorm=2.61 lr=1.6e-04 spd=0.5it/s [3467s / ETA 33789s]
+  [P1  1700/18000] loss=1.9242 lm=1.9242 gnorm=3.30 lr=1.6e-04 spd=0.5it/s [3519s / ETA 33739s]
+  [P1  1725/18000] loss=1.8734 lm=1.8734 gnorm=3.21 lr=1.5e-04 spd=0.5it/s [3571s / ETA 33690s]
+  [P1  1750/18000] loss=1.8437 lm=1.8437 gnorm=2.57 lr=1.5e-04 spd=0.5it/s [3623s / ETA 33642s]
+  [P1  1775/18000] loss=1.7835 lm=1.7835 gnorm=2.81 lr=1.5e-04 spd=0.5it/s [3675s / ETA 33593s]
+  [P1  1800/18000] loss=1.8107 lm=1.8107 gnorm=2.61 lr=1.5e-04 spd=0.5it/s [3727s / ETA 33545s]
+  [P1  1825/18000] loss=1.8030 lm=1.8030 gnorm=2.44 lr=1.5e-04 spd=0.5it/s [3779s / ETA 33496s]
+  [P1  1850/18000] loss=1.8191 lm=1.8191 gnorm=2.86 lr=1.5e-04 spd=0.5it/s [3831s / ETA 33446s]
+  [P1  1875/18000] loss=1.7654 lm=1.7654 gnorm=2.47 lr=1.5e-04 spd=0.5it/s [3883s / ETA 33397s]
+  [P1  1900/18000] loss=1.8021 lm=1.8021 gnorm=2.62 lr=1.4e-04 spd=0.5it/s [3935s / ETA 33347s]
+  [P1  1925/18000] loss=1.8410 lm=1.8410 gnorm=2.63 lr=1.4e-04 spd=0.5it/s [3988s / ETA 33299s]
+  [P1  1950/18000] loss=1.8350 lm=1.8350 gnorm=2.63 lr=1.4e-04 spd=0.5it/s [4040s / ETA 33250s]
+  [P1  1975/18000] loss=1.8293 lm=1.8293 gnorm=2.63 lr=1.4e-04 spd=0.5it/s [4092s / ETA 33200s]
+  [P1  2000/18000] loss=1.7795 lm=1.7795 gnorm=2.16 lr=1.4e-04 spd=0.5it/s [4144s / ETA 33152s]
+
+  ╔══ EVAL @ step 2000 (Phase 1) ══
+  ║ LM loss: 1.7795
+  ║ Sample: The Branchael in the side with the throughout the mission is a postitution in a 
+  ╚════════════════════════════════════════
+
+    ⚠ HF upload failed: 401 Client Error. (Request ID: Root=1-69d5939e-33889a1907d729046553aa72;73b07af3-1d33-46ce-9ff3-4ec0aec032f2)
+
+Repository Not Found for url: https://huggingface.co/api/models/kaaninel/ANT/preupload/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+Invalid username or password.
+Note: Creating a commit assumes that the repo already exists on the Huggingface Hub. Please use `create_repo` if it's not the case.
+  [P1  2025/18000] loss=1.8844 lm=1.8844 gnorm=2.88 lr=1.4e-04 spd=0.5it/s [4197s / ETA 33112s]
+  [P1  2050/18000] loss=1.7716 lm=1.7716 gnorm=2.25 lr=1.4e-04 spd=0.5it/s [4250s / ETA 33063s]
+  [P1  2075/18000] loss=1.7866 lm=1.7866 gnorm=2.16 lr=1.3e-04 spd=0.5it/s [4302s / ETA 33014s]
+  [P1  2100/18000] loss=1.8226 lm=1.8226 gnorm=2.38 lr=1.3e-04 spd=0.5it/s [4354s / ETA 32964s]
+  [P1  2125/18000] loss=1.7715 lm=1.7715 gnorm=2.86 lr=1.3e-04 spd=0.5it/s [4406s / ETA 32915s]
+  [P1  2150/18000] loss=1.8038 lm=1.8038 gnorm=3.56 lr=1.3e-04 spd=0.5it/s [4458s / ETA 32866s]
+  [P1  2175/18000] loss=1.7165 lm=1.7165 gnorm=2.53 lr=1.3e-04 spd=0.5it/s [4511s / ETA 32818s]
+  [P1  2200/18000] loss=1.7809 lm=1.7809 gnorm=2.50 lr=1.3e-04 spd=0.5it/s [4563s / ETA 32770s]
+  [P1  2225/18000] loss=1.7376 lm=1.7376 gnorm=2.37 lr=1.3e-04 spd=0.5it/s [4615s / ETA 32722s]
+  [P1  2250/18000] loss=1.8967 lm=1.8967 gnorm=2.49 lr=1.2e-04 spd=0.5it/s [4668s / ETA 32673s]
+  [P1  2275/18000] loss=1.7936 lm=1.7936 gnorm=2.56 lr=1.2e-04 spd=0.5it/s [4720s / ETA 32624s]
+  [P1  2300/18000] loss=1.7976 lm=1.7976 gnorm=2.37 lr=1.2e-04 spd=0.5it/s [4772s / ETA 32575s]
+  [P1  2325/18000] loss=1.7638 lm=1.7638 gnorm=2.40 lr=1.2e-04 spd=0.5it/s [4824s / ETA 32526s]
+  [P1  2350/18000] loss=1.8254 lm=1.8254 gnorm=2.72 lr=1.2e-04 spd=0.5it/s [4877s / ETA 32476s]
+  [P1  2375/18000] loss=1.7277 lm=1.7277 gnorm=2.78 lr=1.2e-04 spd=0.5it/s [4929s / ETA 32427s]
+  [P1  2400/18000] loss=1.7980 lm=1.7980 gnorm=2.35 lr=1.1e-04 spd=0.5it/s [4982s / ETA 32381s]
+  [P1  2425/18000] loss=1.8516 lm=1.8516 gnorm=2.19 lr=1.1e-04 spd=0.5it/s [5034s / ETA 32333s]
+  [P1  2450/18000] loss=1.8278 lm=1.8278 gnorm=2.33 lr=1.1e-04 spd=0.5it/s [5087s / ETA 32284s]
+  [P1  2475/18000] loss=1.7632 lm=1.7632 gnorm=2.73 lr=1.1e-04 spd=0.5it/s [5139s / ETA 32235s]
+  [P1  2500/18000] loss=1.8023 lm=1.8023 gnorm=2.76 lr=1.1e-04 spd=0.5it/s [5191s / ETA 32185s]
+
+  ╔══ EVAL @ step 2500 (Phase 1) ══
+  ║ LM loss: 1.8023
+  ║ Sample: The state of the temperation of the agree in the made country is person, in seas
+  ╚════════════════════════════════════════
+
+  [P1  2525/18000] loss=1.7353 lm=1.7353 gnorm=2.47 lr=1.1e-04 spd=0.5it/s [5244s / ETA 32141s]
+  [P1  2550/18000] loss=1.7354 lm=1.7354 gnorm=2.54 lr=1.0e-04 spd=0.5it/s [5296s / ETA 32090s]
+  [P1  2575/18000] loss=1.8207 lm=1.8207 gnorm=2.70 lr=1.0e-04 spd=0.5it/s [5349s / ETA 32041s]
+  [P1  2600/18000] loss=1.7956 lm=1.7956 gnorm=2.03 lr=1.0e-04 spd=0.5it/s [5401s / ETA 31991s]
+  [P1  2625/18000] loss=1.7825 lm=1.7825 gnorm=2.31 lr=9.9e-05 spd=0.5it/s [5453s / ETA 31941s]
+  [P1  2650/18000] loss=1.7851 lm=1.7851 gnorm=2.28 lr=9.8e-05 spd=0.5it/s [5506s / ETA 31891s]
+  [P1  2675/18000] loss=1.7985 lm=1.7985 gnorm=2.12 lr=9.6e-05 spd=0.5it/s [5558s / ETA 31842s]
+  [P1  2700/18000] loss=1.7900 lm=1.7900 gnorm=2.32 lr=9.5e-05 spd=0.5it/s [5610s / ETA 31792s]
+  [P1  2725/18000] loss=1.7283 lm=1.7283 gnorm=2.57 lr=9.3e-05 spd=0.5it/s [5663s / ETA 31743s]
+  [P1  2750/18000] loss=1.7778 lm=1.7778 gnorm=2.29 lr=9.1e-05 spd=0.5it/s [5715s / ETA 31694s]
+  [P1  2775/18000] loss=1.7866 lm=1.7866 gnorm=2.32 lr=9.0e-05 spd=0.5it/s [5768s / ETA 31645s]
+  [P1  2800/18000] loss=1.9034 lm=1.9034 gnorm=2.48 lr=8.8e-05 spd=0.5it/s [5820s / ETA 31595s]
+  [P1  2825/18000] loss=1.7450 lm=1.7450 gnorm=2.96 lr=8.6e-05 spd=0.5it/s [5872s / ETA 31545s]
+  [P1  2850/18000] loss=1.6799 lm=1.6799 gnorm=2.01 lr=8.5e-05 spd=0.5it/s [5925s / ETA 31494s]
+  [P1  2875/18000] loss=1.6352 lm=1.6352 gnorm=2.49 lr=8.3e-05 spd=0.5it/s [5977s / ETA 31443s]
+  [P1  2900/18000] loss=1.7754 lm=1.7754 gnorm=2.61 lr=8.2e-05 spd=0.5it/s [6029s / ETA 31392s]
+  [P1  2925/18000] loss=1.6615 lm=1.6615 gnorm=2.34 lr=8.0e-05 spd=0.5it/s [6081s / ETA 31342s]
+  [P1  2950/18000] loss=1.7697 lm=1.7697 gnorm=2.38 lr=7.9e-05 spd=0.5it/s [6134s / ETA 31292s]
+  [P1  2975/18000] loss=1.6801 lm=1.6801 gnorm=2.47 lr=7.7e-05 spd=0.5it/s [6186s / ETA 31241s]
+  [P1  3000/18000] loss=1.9029 lm=1.9029 gnorm=2.76 lr=7.5e-05 spd=0.5it/s [6239s / ETA 31193s]
+
+  ╔══ EVAL @ step 3000 (Phase 1) ══
+  ║ LM loss: 1.9029
+  ║ Sample: The child to suppension of the chose of the was depine family was the directions
+  ╚════════════════════════════════════════
+
+  [P1  3025/18000] loss=1.7329 lm=1.7329 gnorm=2.82 lr=7.4e-05 spd=0.5it/s [6292s / ETA 31147s]
+  [P1  3050/18000] loss=1.7491 lm=1.7491 gnorm=2.32 lr=7.2e-05 spd=0.5it/s [6344s / ETA 31096s]
+  [P1  3075/18000] loss=1.7360 lm=1.7360 gnorm=2.19 lr=7.1e-05 spd=0.5it/s [6396s / ETA 31046s]
+  [P1  3100/18000] loss=1.6594 lm=1.6594 gnorm=2.30 lr=6.9e-05 spd=0.5it/s [6449s / ETA 30996s]
+  [P1  3125/18000] loss=1.6806 lm=1.6806 gnorm=2.58 lr=6.8e-05 spd=0.5it/s [6501s / ETA 30944s]
+  [P1  3150/18000] loss=1.7731 lm=1.7731 gnorm=2.54 lr=6.6e-05 spd=0.5it/s [6553s / ETA 30892s]
+  [P1  3175/18000] loss=1.6712 lm=1.6712 gnorm=2.15 lr=6.5e-05 spd=0.5it/s [6605s / ETA 30840s]
+  [P1  3200/18000] loss=1.8066 lm=1.8066 gnorm=2.53 lr=6.3e-05 spd=0.5it/s [6657s / ETA 30789s]
+  [P1  3225/18000] loss=1.7220 lm=1.7220 gnorm=2.15 lr=6.2e-05 spd=0.5it/s [6709s / ETA 30737s]
+  [P1  3250/18000] loss=1.7652 lm=1.7652 gnorm=2.34 lr=6.0e-05 spd=0.5it/s [6761s / ETA 30685s]
+  [P1  3275/18000] loss=1.6624 lm=1.6624 gnorm=2.64 lr=5.9e-05 spd=0.5it/s [6813s / ETA 30634s]
+  [P1  3300/18000] loss=1.7842 lm=1.7842 gnorm=2.73 lr=5.7e-05 spd=0.5it/s [6865s / ETA 30582s]
+  [P1  3325/18000] loss=1.8657 lm=1.8657 gnorm=2.49 lr=5.6e-05 spd=0.5it/s [6918s / ETA 30531s]
+  [P1  3350/18000] loss=1.6989 lm=1.6989 gnorm=2.57 lr=5.4e-05 spd=0.5it/s [6970s / ETA 30480s]
+  [P1  3375/18000] loss=1.7473 lm=1.7473 gnorm=2.50 lr=5.3e-05 spd=0.5it/s [7022s / ETA 30429s]
+  [P1  3400/18000] loss=1.8418 lm=1.8418 gnorm=2.71 lr=5.2e-05 spd=0.5it/s [7074s / ETA 30377s]
+  [P1  3425/18000] loss=1.7119 lm=1.7119 gnorm=2.35 lr=5.0e-05 spd=0.5it/s [7126s / ETA 30325s]
+  [P1  3450/18000] loss=1.7059 lm=1.7059 gnorm=2.31 lr=4.9e-05 spd=0.5it/s [7178s / ETA 30274s]
+  [P1  3475/18000] loss=1.7510 lm=1.7510 gnorm=2.14 lr=4.7e-05 spd=0.5it/s [7231s / ETA 30223s]
+  [P1  3500/18000] loss=1.7830 lm=1.7830 gnorm=2.46 lr=4.6e-05 spd=0.5it/s [7283s / ETA 30173s]
+
+  ╔══ EVAL @ step 3500 (Phase 1) ══
+  ║ LM loss: 1.7830
+  ║ Sample: The Bases are in 1989 – 1994 to 1931.
+  ╚════════════════════════════════════════
+
+  [P1  3525/18000] loss=1.7101 lm=1.7101 gnorm=2.09 lr=4.5e-05 spd=0.5it/s [7335s / ETA 30122s]
+  [P1  3550/18000] loss=1.7409 lm=1.7409 gnorm=2.41 lr=4.3e-05 spd=0.5it/s [7388s / ETA 30071s]
+  [P1  3575/18000] loss=1.6984 lm=1.6984 gnorm=2.09 lr=4.2e-05 spd=0.5it/s [7440s / ETA 30019s]
+  [P1  3600/18000] loss=1.7211 lm=1.7211 gnorm=2.02 lr=4.1e-05 spd=0.5it/s [7492s / ETA 29968s]
+  [P1  3625/18000] loss=1.7396 lm=1.7396 gnorm=2.12 lr=3.9e-05 spd=0.5it/s [7544s / ETA 29916s]
+  [P1  3650/18000] loss=1.7079 lm=1.7079 gnorm=2.24 lr=3.8e-05 spd=0.5it/s [7596s / ETA 29864s]
+  [P1  3675/18000] loss=1.6601 lm=1.6601 gnorm=2.25 lr=3.7e-05 spd=0.5it/s [7648s / ETA 29813s]
+  [P1  3700/18000] loss=1.6876 lm=1.6876 gnorm=2.22 lr=3.6e-05 spd=0.5it/s [7701s / ETA 29762s]
+  [P1  3725/18000] loss=1.6859 lm=1.6859 gnorm=2.68 lr=3.5e-05 spd=0.5it/s [7754s / ETA 29715s]
+  [P1  3750/18000] loss=1.7248 lm=1.7248 gnorm=2.30 lr=3.3e-05 spd=0.4it/s [7814s / ETA 29692s]
+  [P1  3775/18000] loss=1.6704 lm=1.6704 gnorm=2.75 lr=3.2e-05 spd=0.4it/s [7873s / ETA 29666s]
+  [P1  3800/18000] loss=1.7206 lm=1.7206 gnorm=2.10 lr=3.1e-05 spd=0.4it/s [7932s / ETA 29639s]
+  [P1  3825/18000] loss=1.6710 lm=1.6710 gnorm=2.03 lr=3.0e-05 spd=0.4it/s [7990s / ETA 29609s]
+  [P1  3850/18000] loss=1.7271 lm=1.7271 gnorm=2.75 lr=2.9e-05 spd=0.4it/s [8048s / ETA 29580s]
+  [P1  3875/18000] loss=1.7570 lm=1.7570 gnorm=2.11 lr=2.8e-05 spd=0.4it/s [8107s / ETA 29550s]
+  [P1  3900/18000] loss=1.7043 lm=1.7043 gnorm=2.46 lr=2.7e-05 spd=0.4it/s [8165s / ETA 29520s]
+  [P1  3925/18000] loss=1.7428 lm=1.7428 gnorm=2.40 lr=2.6e-05 spd=0.4it/s [8223s / ETA 29489s]
+  [P1  3950/18000] loss=1.7551 lm=1.7551 gnorm=2.29 lr=2.4e-05 spd=0.4it/s [8282s / ETA 29459s]
+  [P1  3975/18000] loss=1.7078 lm=1.7078 gnorm=2.22 lr=2.3e-05 spd=0.4it/s [8341s / ETA 29428s]
+  [P1  4000/18000] loss=1.7458 lm=1.7458 gnorm=2.61 lr=2.2e-05 spd=0.4it/s [8399s / ETA 29396s]
+
+  ╔══ EVAL @ step 4000 (Phase 1) ══
+  ║ LM loss: 1.7458
+  ║ Sample: The service state of a several season is the into post in 1980.
+  ╚════════════════════════════════════════
+
+    ⚠ HF upload failed: 401 Client Error. (Request ID: Root=1-69d5a43c-0705b2fb6a63834018c463a2;8084286a-1515-4dab-9903-155107b18217)
+
+Repository Not Found for url: https://huggingface.co/api/models/kaaninel/ANT/preupload/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+Invalid username or password.
+Note: Creating a commit assumes that the repo already exists on the Huggingface Hub. Please use `create_repo` if it's not the case.
+  [P1  4025/18000] loss=1.6443 lm=1.6443 gnorm=2.87 lr=2.1e-05 spd=0.4it/s [8458s / ETA 29368s]
+  [P1  4050/18000] loss=1.6226 lm=1.6226 gnorm=2.21 lr=2.1e-05 spd=0.4it/s [8517s / ETA 29335s]
+  [P1  4075/18000] loss=1.6167 lm=1.6167 gnorm=2.14 lr=2.0e-05 spd=0.4it/s [8575s / ETA 29303s]
+  [P1  4100/18000] loss=1.7001 lm=1.7001 gnorm=2.34 lr=1.9e-05 spd=0.4it/s [8634s / ETA 29270s]
+  [P1  4125/18000] loss=1.7927 lm=1.7927 gnorm=2.36 lr=1.8e-05 spd=0.4it/s [8692s / ETA 29238s]
+  [P1  4150/18000] loss=1.7308 lm=1.7308 gnorm=2.52 lr=1.7e-05 spd=0.4it/s [8751s / ETA 29205s]
+  [P1  4175/18000] loss=1.8709 lm=1.8709 gnorm=2.27 lr=1.6e-05 spd=0.4it/s [8810s / ETA 29172s]
+  [P1  4200/18000] loss=1.6016 lm=1.6016 gnorm=2.23 lr=1.5e-05 spd=0.4it/s [8868s / ETA 29139s]
+  [P1  4225/18000] loss=1.7669 lm=1.7669 gnorm=2.55 lr=1.4e-05 spd=0.4it/s [8927s / ETA 29105s]
+  [P1  4250/18000] loss=1.7674 lm=1.7674 gnorm=2.04 lr=1.4e-05 spd=0.4it/s [8985s / ETA 29070s]
+  [P1  4275/18000] loss=1.7543 lm=1.7543 gnorm=2.18 lr=1.3e-05 spd=0.4it/s [9044s / ETA 29035s]
+  [P1  4300/18000] loss=1.7161 lm=1.7161 gnorm=2.28 lr=1.2e-05 spd=0.4it/s [9102s / ETA 29000s]
+  [P1  4325/18000] loss=1.6271 lm=1.6271 gnorm=2.26 lr=1.2e-05 spd=0.4it/s [9161s / ETA 28964s]
+  [P1  4350/18000] loss=1.6818 lm=1.6818 gnorm=2.24 lr=1.1e-05 spd=0.4it/s [9219s / ETA 28929s]
+  [P1  4375/18000] loss=1.6037 lm=1.6037 gnorm=2.59 lr=1.0e-05 spd=0.4it/s [9278s / ETA 28894s]
+  [P1  4400/18000] loss=1.7146 lm=1.7146 gnorm=2.07 lr=9.5e-06 spd=0.4it/s [9336s / ETA 28858s]
+  [P1  4425/18000] loss=1.6497 lm=1.6497 gnorm=2.27 lr=8.9e-06 spd=0.4it/s [9395s / ETA 28821s]
+  [P1  4450/18000] loss=1.6740 lm=1.6740 gnorm=2.28 lr=8.3e-06 spd=0.4it/s [9453s / ETA 28784s]
+  [P1  4475/18000] loss=1.6523 lm=1.6523 gnorm=2.01 lr=7.8e-06 spd=0.4it/s [9511s / ETA 28747s]
+  [P1  4500/18000] loss=1.7363 lm=1.7363 gnorm=2.19 lr=7.3e-06 spd=0.4it/s [9570s / ETA 28710s]
+
+  ╔══ EVAL @ step 4500 (Phase 1) ══
+  ║ LM loss: 1.7363
+  ║ Sample: The considered at home that the and Confire and but the fallowers of the continu
+  ╚════════════════════════════════════════
+
+  [P1  4525/18000] loss=1.5905 lm=1.5905 gnorm=2.32 lr=6.7e-06 spd=0.4it/s [9629s / ETA 28675s]
+  [P1  4550/18000] loss=1.6826 lm=1.6826 gnorm=2.02 lr=6.3e-06 spd=0.4it/s [9688s / ETA 28638s]
+  [P1  4575/18000] loss=1.6957 lm=1.6957 gnorm=2.16 lr=5.8e-06 spd=0.4it/s [9746s / ETA 28600s]
+  [P1  4600/18000] loss=1.6041 lm=1.6041 gnorm=2.24 lr=5.4e-06 spd=0.4it/s [9805s / ETA 28562s]
+  [P1  4625/18000] loss=1.6935 lm=1.6935 gnorm=2.52 lr=5.0e-06 spd=0.4it/s [9864s / ETA 28525s]
+  [P1  4650/18000] loss=1.7218 lm=1.7218 gnorm=2.27 lr=4.6e-06 spd=0.4it/s [9923s / ETA 28488s]
+  [P1  4675/18000] loss=1.7296 lm=1.7296 gnorm=2.27 lr=4.2e-06 spd=0.4it/s [9981s / ETA 28450s]
+  [P1  4700/18000] loss=1.7257 lm=1.7257 gnorm=2.37 lr=3.9e-06 spd=0.4it/s [10040s / ETA 28411s]
+  [P1  4725/18000] loss=1.6628 lm=1.6628 gnorm=2.42 lr=3.6e-06 spd=0.4it/s [10098s / ETA 28372s]
+  [P1  4750/18000] loss=1.6446 lm=1.6446 gnorm=2.08 lr=3.3e-06 spd=0.4it/s [10157s / ETA 28333s]
+  [P1  4775/18000] loss=1.7633 lm=1.7633 gnorm=2.25 lr=3.1e-06 spd=0.4it/s [10216s / ETA 28294s]
+  [P1  4800/18000] loss=1.5985 lm=1.5985 gnorm=1.95 lr=2.8e-06 spd=0.4it/s [10274s / ETA 28255s]
+  [P1  4825/18000] loss=1.7067 lm=1.7067 gnorm=2.33 lr=2.6e-06 spd=0.4it/s [10333s / ETA 28215s]
+  [P1  4850/18000] loss=1.6950 lm=1.6950 gnorm=2.15 lr=2.5e-06 spd=0.4it/s [10392s / ETA 28175s]
+  [P1  4875/18000] loss=1.8004 lm=1.8004 gnorm=2.80 lr=2.3e-06 spd=0.4it/s [10450s / ETA 28135s]
+  [P1  4900/18000] loss=1.7011 lm=1.7011 gnorm=2.25 lr=2.2e-06 spd=0.4it/s [10509s / ETA 28095s]
+  [P1  4925/18000] loss=1.6671 lm=1.6671 gnorm=2.17 lr=2.1e-06 spd=0.4it/s [10567s / ETA 28054s]
+  [P1  4950/18000] loss=1.5766 lm=1.5766 gnorm=2.10 lr=2.1e-06 spd=0.4it/s [10626s / ETA 28013s]
+  [P1  4975/18000] loss=1.5748 lm=1.5748 gnorm=2.29 lr=2.0e-06 spd=0.4it/s [10684s / ETA 27972s]
+  [P1  5000/18000] loss=1.7008 lm=1.7008 gnorm=2.21 lr=2.0e-06 spd=0.4it/s [10743s / ETA 27931s]
+
+  ══ Phase 1 → 2: Adding Memory QA ══
+
+
+  ╔══ EVAL @ step 5000 (Phase 1) ══
+  ║ LM loss: 1.7008
+  ║ Sample: The commentary and been for the stream.
+  ╚════════════════════════════════════════
+
+  [P2  5025/18000] loss=1.1588 lm=1.7891 qa=0.5285 gnorm=4.12 lr=3.4e-05 spd=0.4it/s [10814s / ETA 27922s]
+  [P2  5050/18000] loss=0.9397 lm=1.7189 qa=0.1604 gnorm=2.56 lr=6.7e-05 spd=0.4it/s [10884s / ETA 27911s]
+  [P2  5075/18000] loss=0.9491 lm=1.7221 qa=0.1760 gnorm=3.82 lr=1.0e-04 spd=0.4it/s [10954s / ETA 27898s]
+  [P2  5100/18000] loss=0.9462 lm=1.7288 qa=0.1636 gnorm=2.28 lr=1.3e-04 spd=0.4it/s [11024s / ETA 27885s]
+  [P2  5125/18000] loss=0.9659 lm=1.7916 qa=0.1402 gnorm=2.66 lr=1.3e-04 spd=0.4it/s [11095s / ETA 27872s]
+  [P2  5150/18000] loss=0.9796 lm=1.7368 qa=0.2223 gnorm=3.47 lr=1.3e-04 spd=0.4it/s [11165s / ETA 27857s]
+  [P2  5175/18000] loss=0.9326 lm=1.7354 qa=0.1298 gnorm=2.62 lr=1.3e-04 spd=0.4it/s [11234s / ETA 27842s]
+  [P2  5200/18000] loss=0.9803 lm=1.8155 qa=0.1451 gnorm=2.10 lr=1.3e-04 spd=0.4it/s [11305s / ETA 27827s]
+  [P2  5225/18000] loss=0.9287 lm=1.7202 qa=0.1371 gnorm=2.33 lr=1.3e-04 spd=0.4it/s [11375s / ETA 27812s]
+  [P2  5250/18000] loss=0.9692 lm=1.7833 qa=0.1552 gnorm=2.63 lr=1.3e-04 spd=0.4it/s [11446s / ETA 27797s]
+  [P2  5275/18000] loss=0.9549 lm=1.7589 qa=0.1509 gnorm=2.67 lr=1.3e-04 spd=0.4it/s [11516s / ETA 27780s]
+  [P2  5300/18000] loss=0.8989 lm=1.6820 qa=0.1157 gnorm=2.12 lr=1.3e-04 spd=0.4it/s [11586s / ETA 27762s]
+  [P2  5325/18000] loss=0.9416 lm=1.7203 qa=0.1629 gnorm=2.94 lr=1.3e-04 spd=0.4it/s [11656s / ETA 27744s]
+  [P2  5350/18000] loss=0.9395 lm=1.7340 qa=0.1451 gnorm=2.11 lr=1.3e-04 spd=0.4it/s [11726s / ETA 27725s]
+  [P2  5375/18000] loss=0.9486 lm=1.7455 qa=0.1517 gnorm=3.19 lr=1.3e-04 spd=0.4it/s [11796s / ETA 27707s]
+  [P2  5400/18000] loss=0.9088 lm=1.7095 qa=0.1081 gnorm=2.25 lr=1.3e-04 spd=0.4it/s [11866s / ETA 27688s]
+  [P2  5425/18000] loss=0.9290 lm=1.7656 qa=0.0925 gnorm=2.86 lr=1.3e-04 spd=0.4it/s [11937s / ETA 27669s]
+  [P2  5450/18000] loss=0.8886 lm=1.6545 qa=0.1228 gnorm=2.46 lr=1.3e-04 spd=0.4it/s [12006s / ETA 27648s]
+  [P2  5475/18000] loss=0.9874 lm=1.8727 qa=0.1022 gnorm=2.32 lr=1.3e-04 spd=0.4it/s [12076s / ETA 27627s]
+  [P2  5500/18000] loss=0.8853 lm=1.6664 qa=0.1042 gnorm=2.42 lr=1.3e-04 spd=0.4it/s [12147s / ETA 27606s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 23/37 = 62.2%
+    3-fact: 7/21 = 33.3%
+
+  ╔══ EVAL @ step 5500 (Phase 2) ══
+  ║ QA Accuracy: 72.0%  (best: 72.0%)
+  ║ LM loss: 1.6664
+  ║ QA loss: 0.1042
+  ║ Sample: The original to project of the early was control that the controlled the light i
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 72.0%)
+  [P2  5525/18000] loss=0.9118 lm=1.7392 qa=0.0844 gnorm=2.34 lr=1.3e-04 spd=0.3it/s [12219s / ETA 27590s]
+  [P2  5550/18000] loss=0.9330 lm=1.7752 qa=0.0909 gnorm=1.89 lr=1.3e-04 spd=0.3it/s [12289s / ETA 27568s]
+  [P2  5575/18000] loss=0.9386 lm=1.7883 qa=0.0889 gnorm=2.81 lr=1.3e-04 spd=0.4it/s [12360s / ETA 27546s]
+  [P2  5600/18000] loss=0.9616 lm=1.8306 qa=0.0927 gnorm=2.47 lr=1.3e-04 spd=0.4it/s [12430s / ETA 27524s]
+  [P2  5625/18000] loss=0.8846 lm=1.6748 qa=0.0944 gnorm=2.59 lr=1.3e-04 spd=0.4it/s [12500s / ETA 27500s]
+  [P2  5650/18000] loss=0.9108 lm=1.7234 qa=0.0981 gnorm=3.33 lr=1.3e-04 spd=0.4it/s [12571s / ETA 27478s]
+  [P2  5675/18000] loss=0.9098 lm=1.6988 qa=0.1207 gnorm=2.35 lr=1.3e-04 spd=0.4it/s [12641s / ETA 27454s]
+  [P2  5700/18000] loss=0.8794 lm=1.6847 qa=0.0741 gnorm=1.85 lr=1.3e-04 spd=0.4it/s [12711s / ETA 27430s]
+  [P2  5725/18000] loss=0.8664 lm=1.6225 qa=0.1103 gnorm=3.37 lr=1.3e-04 spd=0.4it/s [12781s / ETA 27404s]
+  [P2  5750/18000] loss=0.8921 lm=1.7072 qa=0.0769 gnorm=1.84 lr=1.3e-04 spd=0.4it/s [12851s / ETA 27378s]
+  [P2  5775/18000] loss=1.0065 lm=1.9215 qa=0.0914 gnorm=2.19 lr=1.3e-04 spd=0.4it/s [12921s / ETA 27353s]
+  [P2  5800/18000] loss=0.9172 lm=1.7802 qa=0.0542 gnorm=1.66 lr=1.3e-04 spd=0.4it/s [12991s / ETA 27326s]
+  [P2  5825/18000] loss=0.8412 lm=1.6310 qa=0.0515 gnorm=1.75 lr=1.3e-04 spd=0.4it/s [13061s / ETA 27299s]
+  [P2  5850/18000] loss=0.8886 lm=1.7181 qa=0.0590 gnorm=2.17 lr=1.3e-04 spd=0.4it/s [13131s / ETA 27272s]
+  [P2  5875/18000] loss=0.9285 lm=1.7447 qa=0.1122 gnorm=5.41 lr=1.3e-04 spd=0.4it/s [13201s / ETA 27244s]
+  [P2  5900/18000] loss=0.9156 lm=1.7661 qa=0.0651 gnorm=2.18 lr=1.3e-04 spd=0.4it/s [13271s / ETA 27216s]
+  [P2  5925/18000] loss=0.8856 lm=1.7107 qa=0.0606 gnorm=1.88 lr=1.3e-04 spd=0.4it/s [13340s / ETA 27188s]
+  [P2  5950/18000] loss=0.8899 lm=1.7341 qa=0.0457 gnorm=2.16 lr=1.3e-04 spd=0.4it/s [13410s / ETA 27159s]
+  [P2  5975/18000] loss=0.8831 lm=1.6455 qa=0.1206 gnorm=2.46 lr=1.3e-04 spd=0.4it/s [13480s / ETA 27130s]
+  [P2  6000/18000] loss=0.8900 lm=1.7096 qa=0.0704 gnorm=2.50 lr=1.3e-04 spd=0.4it/s [13550s / ETA 27100s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 34/37 = 91.9%
+    3-fact: 13/21 = 61.9%
+
+  ╔══ EVAL @ step 6000 (Phase 2) ══
+  ║ QA Accuracy: 89.0%  (best: 89.0%)
+  ║ LM loss: 1.7096
+  ║ QA loss: 0.0704
+  ║ Sample: The male in 1947 the with the Annel Paris, performan married in the married and 
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 89.0%)
+    ⚠ HF upload failed: 401 Client Error. (Request ID: Root=1-69d5b85e-7e46bffb6fa9532c1ed01cbb;f8e0e88f-6015-4e28-8fca-1c26f8e04e71)
+
+Repository Not Found for url: https://huggingface.co/api/models/kaaninel/ANT/preupload/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+Invalid username or password.
+Note: Creating a commit assumes that the repo already exists on the Huggingface Hub. Please use `create_repo` if it's not the case.
+  [P2  6025/18000] loss=0.8566 lm=1.6562 qa=0.0571 gnorm=1.89 lr=1.3e-04 spd=0.4it/s [13623s / ETA 27076s]
+  [P2  6050/18000] loss=0.8675 lm=1.6544 qa=0.0806 gnorm=2.47 lr=1.3e-04 spd=0.4it/s [13692s / ETA 27045s]
+  [P2  6075/18000] loss=0.8837 lm=1.7004 qa=0.0671 gnorm=2.12 lr=1.3e-04 spd=0.4it/s [13762s / ETA 27015s]
+  [P2  6100/18000] loss=0.9302 lm=1.7881 qa=0.0723 gnorm=2.20 lr=1.3e-04 spd=0.4it/s [13832s / ETA 26983s]
+  [P2  6125/18000] loss=0.9104 lm=1.7247 qa=0.0961 gnorm=2.25 lr=1.3e-04 spd=0.4it/s [13902s / ETA 26952s]
+  [P2  6150/18000] loss=0.9356 lm=1.8027 qa=0.0686 gnorm=2.86 lr=1.3e-04 spd=0.4it/s [13971s / ETA 26920s]
+  [P2  6175/18000] loss=0.8477 lm=1.6746 qa=0.0207 gnorm=1.80 lr=1.3e-04 spd=0.4it/s [14041s / ETA 26888s]
+  [P2  6200/18000] loss=0.9040 lm=1.7215 qa=0.0864 gnorm=2.12 lr=1.3e-04 spd=0.4it/s [14111s / ETA 26856s]
+  [P2  6225/18000] loss=0.9039 lm=1.7015 qa=0.1063 gnorm=2.22 lr=1.3e-04 spd=0.4it/s [14180s / ETA 26823s]
+  [P2  6250/18000] loss=0.8509 lm=1.6358 qa=0.0661 gnorm=2.01 lr=1.3e-04 spd=0.4it/s [14250s / ETA 26790s]
+  [P2  6275/18000] loss=0.8528 lm=1.5908 qa=0.1148 gnorm=2.82 lr=1.3e-04 spd=0.4it/s [14319s / ETA 26756s]
+  [P2  6300/18000] loss=0.8408 lm=1.6319 qa=0.0496 gnorm=1.58 lr=1.3e-04 spd=0.4it/s [14389s / ETA 26722s]
+  [P2  6325/18000] loss=0.8521 lm=1.6432 qa=0.0611 gnorm=1.69 lr=1.3e-04 spd=0.4it/s [14458s / ETA 26688s]
+  [P2  6350/18000] loss=0.8847 lm=1.7213 qa=0.0481 gnorm=2.05 lr=1.3e-04 spd=0.4it/s [14528s / ETA 26654s]
+  [P2  6375/18000] loss=0.9185 lm=1.7810 qa=0.0561 gnorm=2.98 lr=1.3e-04 spd=0.4it/s [14598s / ETA 26619s]
+  [P2  6400/18000] loss=0.8904 lm=1.7338 qa=0.0471 gnorm=2.31 lr=1.3e-04 spd=0.4it/s [14667s / ETA 26584s]
+  [P2  6425/18000] loss=0.8645 lm=1.6951 qa=0.0339 gnorm=1.82 lr=1.3e-04 spd=0.4it/s [14737s / ETA 26550s]
+  [P2  6450/18000] loss=0.8869 lm=1.7005 qa=0.0733 gnorm=1.83 lr=1.3e-04 spd=0.4it/s [14807s / ETA 26514s]
+  [P2  6475/18000] loss=0.9041 lm=1.7465 qa=0.0616 gnorm=1.97 lr=1.3e-04 spd=0.4it/s [14876s / ETA 26478s]
+  [P2  6500/18000] loss=0.8772 lm=1.7347 qa=0.0196 gnorm=1.78 lr=1.3e-04 spd=0.4it/s [14946s / ETA 26444s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 32/37 = 86.5%
+    3-fact: 11/21 = 52.4%
+
+  ╔══ EVAL @ step 6500 (Phase 2) ══
+  ║ QA Accuracy: 85.0%  (best: 89.0%)
+  ║ LM loss: 1.7347
+  ║ QA loss: 0.0196
+  ║ Sample: The not is a record a formal in 1899.
+  ╚════════════════════════════════════════
+
+  [P2  6525/18000] loss=0.8695 lm=1.7013 qa=0.0377 gnorm=1.95 lr=1.3e-04 spd=0.4it/s [15018s / ETA 26412s]
+  [P2  6550/18000] loss=0.9279 lm=1.7952 qa=0.0605 gnorm=1.74 lr=1.3e-04 spd=0.4it/s [15088s / ETA 26376s]
+  [P2  6575/18000] loss=0.8863 lm=1.7288 qa=0.0437 gnorm=1.94 lr=1.3e-04 spd=0.4it/s [15158s / ETA 26339s]
+  [P2  6600/18000] loss=0.8802 lm=1.7412 qa=0.0192 gnorm=1.49 lr=1.3e-04 spd=0.4it/s [15227s / ETA 26302s]
+  [P2  6625/18000] loss=0.8899 lm=1.6919 qa=0.0880 gnorm=2.62 lr=1.3e-04 spd=0.4it/s [15297s / ETA 26265s]
+  [P2  6650/18000] loss=0.8904 lm=1.7477 qa=0.0330 gnorm=1.80 lr=1.3e-04 spd=0.4it/s [15367s / ETA 26228s]
+  [P2  6675/18000] loss=0.8643 lm=1.7075 qa=0.0210 gnorm=1.86 lr=1.3e-04 spd=0.4it/s [15436s / ETA 26189s]
+  [P2  6700/18000] loss=0.8673 lm=1.6853 qa=0.0492 gnorm=3.29 lr=1.3e-04 spd=0.4it/s [15506s / ETA 26151s]
+  [P2  6725/18000] loss=0.8382 lm=1.6704 qa=0.0059 gnorm=1.48 lr=1.3e-04 spd=0.4it/s [15575s / ETA 26113s]
+  [P2  6750/18000] loss=0.8836 lm=1.7163 qa=0.0508 gnorm=2.98 lr=1.3e-04 spd=0.4it/s [15645s / ETA 26075s]
+  [P2  6775/18000] loss=0.8722 lm=1.6980 qa=0.0464 gnorm=2.19 lr=1.2e-04 spd=0.4it/s [15715s / ETA 26036s]
+  [P2  6800/18000] loss=0.8469 lm=1.6319 qa=0.0619 gnorm=2.57 lr=1.2e-04 spd=0.4it/s [15784s / ETA 25997s]
+  [P2  6825/18000] loss=0.8460 lm=1.6501 qa=0.0419 gnorm=1.75 lr=1.2e-04 spd=0.4it/s [15854s / ETA 25959s]
+  [P2  6850/18000] loss=0.9294 lm=1.7836 qa=0.0752 gnorm=2.72 lr=1.2e-04 spd=0.4it/s [15924s / ETA 25920s]
+  [P2  6875/18000] loss=0.8907 lm=1.7366 qa=0.0448 gnorm=1.99 lr=1.2e-04 spd=0.4it/s [15993s / ETA 25880s]
+  [P2  6900/18000] loss=0.8234 lm=1.6100 qa=0.0369 gnorm=1.64 lr=1.2e-04 spd=0.4it/s [16063s / ETA 25840s]
+  [P2  6925/18000] loss=0.8572 lm=1.6513 qa=0.0630 gnorm=2.48 lr=1.2e-04 spd=0.4it/s [16133s / ETA 25800s]
+  [P2  6950/18000] loss=0.8847 lm=1.7532 qa=0.0163 gnorm=1.72 lr=1.2e-04 spd=0.4it/s [16202s / ETA 25760s]
+  [P2  6975/18000] loss=0.8684 lm=1.6891 qa=0.0476 gnorm=1.57 lr=1.2e-04 spd=0.4it/s [16272s / ETA 25720s]
+  [P2  7000/18000] loss=0.8872 lm=1.7381 qa=0.0363 gnorm=1.69 lr=1.2e-04 spd=0.4it/s [16341s / ETA 25679s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 35/37 = 94.6%
+    3-fact: 14/21 = 66.7%
+
+  ╔══ EVAL @ step 7000 (Phase 2) ══
+  ║ QA Accuracy: 91.0%  (best: 91.0%)
+  ║ LM loss: 1.7381
+  ║ QA loss: 0.0363
+  ║ Sample: The tensarces and the previous in the regard of class between merchance may albu
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 91.0%)
+  [P2  7025/18000] loss=0.9137 lm=1.7829 qa=0.0445 gnorm=1.80 lr=1.2e-04 spd=0.4it/s [16413s / ETA 25642s]
+  [P2  7050/18000] loss=0.8339 lm=1.6313 qa=0.0365 gnorm=1.76 lr=1.2e-04 spd=0.4it/s [16483s / ETA 25601s]
+  [P2  7075/18000] loss=0.8875 lm=1.7108 qa=0.0643 gnorm=2.09 lr=1.2e-04 spd=0.4it/s [16549s / ETA 25555s]
+  [P2  7100/18000] loss=0.8920 lm=1.7367 qa=0.0472 gnorm=1.93 lr=1.2e-04 spd=0.4it/s [16612s / ETA 25504s]
+  [P2  7125/18000] loss=0.9207 lm=1.7529 qa=0.0885 gnorm=3.07 lr=1.2e-04 spd=0.4it/s [16675s / ETA 25452s]
+  [P2  7150/18000] loss=0.8813 lm=1.7128 qa=0.0499 gnorm=1.88 lr=1.2e-04 spd=0.4it/s [16738s / ETA 25399s]
+  [P2  7175/18000] loss=0.8286 lm=1.5944 qa=0.0628 gnorm=2.14 lr=1.2e-04 spd=0.4it/s [16801s / ETA 25348s]
+  [P2  7200/18000] loss=0.8729 lm=1.7158 qa=0.0300 gnorm=2.30 lr=1.2e-04 spd=0.4it/s [16864s / ETA 25296s]
+  [P2  7225/18000] loss=0.8453 lm=1.6669 qa=0.0237 gnorm=1.67 lr=1.2e-04 spd=0.4it/s [16927s / ETA 25244s]
+  [P2  7250/18000] loss=0.8685 lm=1.7023 qa=0.0348 gnorm=2.11 lr=1.2e-04 spd=0.4it/s [16989s / ETA 25191s]
+  [P2  7275/18000] loss=0.8421 lm=1.6374 qa=0.0468 gnorm=2.01 lr=1.2e-04 spd=0.4it/s [17052s / ETA 25139s]
+  [P2  7300/18000] loss=0.8534 lm=1.6621 qa=0.0446 gnorm=2.01 lr=1.2e-04 spd=0.4it/s [17115s / ETA 25087s]
+  [P2  7325/18000] loss=0.8459 lm=1.6382 qa=0.0536 gnorm=1.79 lr=1.2e-04 spd=0.4it/s [17178s / ETA 25034s]
+  [P2  7350/18000] loss=0.8668 lm=1.6675 qa=0.0660 gnorm=1.72 lr=1.2e-04 spd=0.4it/s [17241s / ETA 24981s]
+  [P2  7375/18000] loss=0.8111 lm=1.5757 qa=0.0465 gnorm=1.59 lr=1.2e-04 spd=0.4it/s [17303s / ETA 24929s]
+  [P2  7400/18000] loss=0.8684 lm=1.6521 qa=0.0847 gnorm=2.32 lr=1.2e-04 spd=0.4it/s [17366s / ETA 24876s]
+  [P2  7425/18000] loss=0.8534 lm=1.6813 qa=0.0255 gnorm=1.66 lr=1.2e-04 spd=0.4it/s [17428s / ETA 24822s]
+  [P2  7450/18000] loss=0.8392 lm=1.6638 qa=0.0145 gnorm=1.23 lr=1.2e-04 spd=0.4it/s [17491s / ETA 24769s]
+  [P2  7475/18000] loss=0.8297 lm=1.6329 qa=0.0265 gnorm=1.96 lr=1.2e-04 spd=0.4it/s [17553s / ETA 24715s]
+  [P2  7500/18000] loss=0.8490 lm=1.6689 qa=0.0291 gnorm=1.63 lr=1.2e-04 spd=0.4it/s [17615s / ETA 24661s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 36/37 = 97.3%
+    3-fact: 9/21 = 42.9%
+
+  ╔══ EVAL @ step 7500 (Phase 2) ══
+  ║ QA Accuracy: 87.0%  (best: 91.0%)
+  ║ LM loss: 1.6689
+  ║ QA loss: 0.0291
+  ║ Sample: The made service.
+  ╚════════════════════════════════════════
+
+  [P2  7525/18000] loss=0.8891 lm=1.7111 qa=0.0671 gnorm=2.22 lr=1.2e-04 spd=0.4it/s [17679s / ETA 24610s]
+  [P2  7550/18000] loss=0.8336 lm=1.6483 qa=0.0189 gnorm=1.69 lr=1.2e-04 spd=0.4it/s [17741s / ETA 24556s]
+  [P2  7575/18000] loss=0.8582 lm=1.6974 qa=0.0191 gnorm=1.72 lr=1.1e-04 spd=0.4it/s [17804s / ETA 24503s]
+  [P2  7600/18000] loss=0.8866 lm=1.7140 qa=0.0592 gnorm=2.35 lr=1.1e-04 spd=0.4it/s [17866s / ETA 24449s]
+  [P2  7625/18000] loss=0.8606 lm=1.6650 qa=0.0562 gnorm=2.50 lr=1.1e-04 spd=0.4it/s [17929s / ETA 24395s]
+  [P2  7650/18000] loss=0.8426 lm=1.6730 qa=0.0121 gnorm=1.53 lr=1.1e-04 spd=0.4it/s [17991s / ETA 24341s]
+  [P2  7675/18000] loss=0.8626 lm=1.6904 qa=0.0348 gnorm=2.00 lr=1.1e-04 spd=0.4it/s [18054s / ETA 24287s]
+  [P2  7700/18000] loss=0.8159 lm=1.6162 qa=0.0156 gnorm=1.52 lr=1.1e-04 spd=0.4it/s [18116s / ETA 24233s]
+  [P2  7725/18000] loss=0.8890 lm=1.7421 qa=0.0358 gnorm=1.76 lr=1.1e-04 spd=0.4it/s [18179s / ETA 24179s]
+  [P2  7750/18000] loss=0.8392 lm=1.6653 qa=0.0131 gnorm=1.58 lr=1.1e-04 spd=0.4it/s [18241s / ETA 24126s]
+  [P2  7775/18000] loss=0.8194 lm=1.6178 qa=0.0210 gnorm=1.46 lr=1.1e-04 spd=0.4it/s [18304s / ETA 24072s]
+  [P2  7800/18000] loss=0.8298 lm=1.5753 qa=0.0842 gnorm=2.51 lr=1.1e-04 spd=0.4it/s [18367s / ETA 24018s]
+  [P2  7825/18000] loss=0.9195 lm=1.8153 qa=0.0237 gnorm=1.88 lr=1.1e-04 spd=0.4it/s [18429s / ETA 23964s]
+  [P2  7850/18000] loss=0.8475 lm=1.6798 qa=0.0151 gnorm=1.63 lr=1.1e-04 spd=0.4it/s [18491s / ETA 23909s]
+  [P2  7875/18000] loss=0.8687 lm=1.6875 qa=0.0499 gnorm=2.28 lr=1.1e-04 spd=0.4it/s [18554s / ETA 23855s]
+  [P2  7900/18000] loss=0.8256 lm=1.6097 qa=0.0415 gnorm=2.00 lr=1.1e-04 spd=0.4it/s [18616s / ETA 23801s]
+  [P2  7925/18000] loss=0.7776 lm=1.5312 qa=0.0239 gnorm=1.62 lr=1.1e-04 spd=0.4it/s [18679s / ETA 23746s]
+  [P2  7950/18000] loss=0.8263 lm=1.5948 qa=0.0578 gnorm=2.47 lr=1.1e-04 spd=0.4it/s [18741s / ETA 23692s]
+  [P2  7975/18000] loss=0.8678 lm=1.6920 qa=0.0436 gnorm=2.09 lr=1.1e-04 spd=0.4it/s [18803s / ETA 23637s]
+  [P2  8000/18000] loss=0.8271 lm=1.6251 qa=0.0291 gnorm=2.87 lr=1.1e-04 spd=0.4it/s [18865s / ETA 23582s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 16/21 = 76.2%
+
+  ╔══ EVAL @ step 8000 (Phase 2) ══
+  ║ QA Accuracy: 95.0%  (best: 95.0%)
+  ║ LM loss: 1.6251
+  ║ QA loss: 0.0291
+  ║ Sample: The areas considered in he was the married on of the reference and for in the sa
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 95.0%)
+    ⚠ HF upload failed: 401 Client Error. (Request ID: Root=1-69d5cd21-656a99f834ec22df04e21f9b;d40fb67a-9a60-4c1a-a7db-760c078cf4bf)
+
+Repository Not Found for url: https://huggingface.co/api/models/kaaninel/ANT/preupload/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+Invalid username or password.
+Note: Creating a commit assumes that the repo already exists on the Huggingface Hub. Please use `create_repo` if it's not the case.
+  [P2  8025/18000] loss=0.8076 lm=1.5946 qa=0.0205 gnorm=1.69 lr=1.1e-04 spd=0.4it/s [18932s / ETA 23532s]
+  [P2  8050/18000] loss=0.8338 lm=1.6290 qa=0.0386 gnorm=1.69 lr=1.1e-04 spd=0.4it/s [18996s / ETA 23479s]
+  [P2  8075/18000] loss=0.8122 lm=1.6172 qa=0.0072 gnorm=1.44 lr=1.1e-04 spd=0.4it/s [19059s / ETA 23425s]
+  [P2  8100/18000] loss=0.7816 lm=1.5323 qa=0.0309 gnorm=1.91 lr=1.1e-04 spd=0.4it/s [19122s / ETA 23372s]
+  [P2  8125/18000] loss=0.8335 lm=1.6530 qa=0.0141 gnorm=1.53 lr=1.1e-04 spd=0.4it/s [19186s / ETA 23318s]
+  [P2  8150/18000] loss=0.8248 lm=1.5845 qa=0.0650 gnorm=2.82 lr=1.1e-04 spd=0.4it/s [19250s / ETA 23265s]
+  [P2  8175/18000] loss=0.8615 lm=1.6837 qa=0.0393 gnorm=2.01 lr=1.0e-04 spd=0.4it/s [19313s / ETA 23211s]
+  [P2  8200/18000] loss=0.8469 lm=1.6757 qa=0.0182 gnorm=2.17 lr=1.0e-04 spd=0.4it/s [19377s / ETA 23158s]
+  [P2  8225/18000] loss=0.8439 lm=1.6852 qa=0.0026 gnorm=1.18 lr=1.0e-04 spd=0.4it/s [19441s / ETA 23105s]
+  [P2  8250/18000] loss=0.8313 lm=1.6438 qa=0.0188 gnorm=1.73 lr=1.0e-04 spd=0.4it/s [19505s / ETA 23051s]
+  [P2  8275/18000] loss=0.8145 lm=1.6256 qa=0.0033 gnorm=1.40 lr=1.0e-04 spd=0.4it/s [19569s / ETA 22998s]
+  [P2  8300/18000] loss=0.8496 lm=1.6935 qa=0.0056 gnorm=1.55 lr=1.0e-04 spd=0.4it/s [19632s / ETA 22944s]
+  [P2  8325/18000] loss=0.8711 lm=1.7263 qa=0.0160 gnorm=1.63 lr=1.0e-04 spd=0.4it/s [19696s / ETA 22890s]
+  [P2  8350/18000] loss=0.8137 lm=1.6191 qa=0.0082 gnorm=1.68 lr=1.0e-04 spd=0.4it/s [19760s / ETA 22836s]
+  [P2  8375/18000] loss=0.7833 lm=1.5639 qa=0.0026 gnorm=1.21 lr=1.0e-04 spd=0.4it/s [19824s / ETA 22783s]
+  [P2  8400/18000] loss=0.8607 lm=1.7155 qa=0.0060 gnorm=1.50 lr=1.0e-04 spd=0.4it/s [19888s / ETA 22729s]
+  [P2  8425/18000] loss=0.8853 lm=1.7625 qa=0.0080 gnorm=1.48 lr=1.0e-04 spd=0.4it/s [19952s / ETA 22675s]
+  [P2  8450/18000] loss=0.8187 lm=1.6308 qa=0.0066 gnorm=1.25 lr=1.0e-04 spd=0.4it/s [20016s / ETA 22621s]
+  [P2  8475/18000] loss=0.8545 lm=1.6767 qa=0.0324 gnorm=2.10 lr=1.0e-04 spd=0.4it/s [20080s / ETA 22568s]
+  [P2  8500/18000] loss=0.8110 lm=1.5905 qa=0.0314 gnorm=1.73 lr=9.9e-05 spd=0.4it/s [20144s / ETA 22514s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 36/37 = 97.3%
+    3-fact: 19/21 = 90.5%
+
+  ╔══ EVAL @ step 8500 (Phase 2) ══
+  ║ QA Accuracy: 97.0%  (best: 97.0%)
+  ║ LM loss: 1.5905
+  ║ QA loss: 0.0314
+  ║ Sample: The Battle when however, and his not a development to be added to represented th
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 97.0%)
+  [P2  8525/18000] loss=0.7909 lm=1.5764 qa=0.0055 gnorm=1.25 lr=9.9e-05 spd=0.4it/s [20211s / ETA 22463s]
+  [P2  8550/18000] loss=0.8380 lm=1.6737 qa=0.0023 gnorm=1.48 lr=9.8e-05 spd=0.4it/s [20275s / ETA 22409s]
+  [P2  8575/18000] loss=0.8645 lm=1.6838 qa=0.0452 gnorm=3.06 lr=9.8e-05 spd=0.4it/s [20339s / ETA 22355s]
+  [P2  8600/18000] loss=0.8130 lm=1.6205 qa=0.0055 gnorm=1.47 lr=9.7e-05 spd=0.4it/s [20403s / ETA 22301s]
+  [P2  8625/18000] loss=0.8495 lm=1.6824 qa=0.0166 gnorm=1.23 lr=9.7e-05 spd=0.4it/s [20467s / ETA 22247s]
+  [P2  8650/18000] loss=0.8649 lm=1.7130 qa=0.0167 gnorm=2.22 lr=9.6e-05 spd=0.4it/s [20531s / ETA 22192s]
+  [P2  8675/18000] loss=0.8418 lm=1.6651 qa=0.0185 gnorm=1.79 lr=9.6e-05 spd=0.4it/s [20595s / ETA 22138s]
+  [P2  8700/18000] loss=0.8504 lm=1.6952 qa=0.0057 gnorm=1.47 lr=9.5e-05 spd=0.4it/s [20660s / ETA 22084s]
+  [P2  8725/18000] loss=0.8174 lm=1.6294 qa=0.0054 gnorm=1.56 lr=9.5e-05 spd=0.4it/s [20724s / ETA 22030s]
+  [P2  8750/18000] loss=0.8358 lm=1.6704 qa=0.0013 gnorm=1.40 lr=9.4e-05 spd=0.4it/s [20788s / ETA 21976s]
+  [P2  8775/18000] loss=0.7896 lm=1.5635 qa=0.0157 gnorm=1.54 lr=9.4e-05 spd=0.4it/s [20852s / ETA 21921s]
+  [P2  8800/18000] loss=0.8490 lm=1.6786 qa=0.0194 gnorm=1.74 lr=9.3e-05 spd=0.4it/s [20916s / ETA 21866s]
+  [P2  8825/18000] loss=0.7971 lm=1.5823 qa=0.0120 gnorm=1.55 lr=9.3e-05 spd=0.4it/s [20979s / ETA 21811s]
+  [P2  8850/18000] loss=0.7939 lm=1.5767 qa=0.0111 gnorm=1.73 lr=9.3e-05 spd=0.4it/s [21043s / ETA 21756s]
+  [P2  8875/18000] loss=0.8685 lm=1.7293 qa=0.0077 gnorm=1.90 lr=9.2e-05 spd=0.4it/s [21106s / ETA 21701s]
+  [P2  8900/18000] loss=0.8123 lm=1.6167 qa=0.0079 gnorm=1.47 lr=9.2e-05 spd=0.4it/s [21170s / ETA 21646s]
+  [P2  8925/18000] loss=0.8190 lm=1.6366 qa=0.0013 gnorm=1.29 lr=9.1e-05 spd=0.4it/s [21233s / ETA 21590s]
+  [P2  8950/18000] loss=0.7848 lm=1.5659 qa=0.0037 gnorm=1.24 lr=9.1e-05 spd=0.4it/s [21297s / ETA 21535s]
+  [P2  8975/18000] loss=0.7724 lm=1.5279 qa=0.0169 gnorm=1.85 lr=9.0e-05 spd=0.4it/s [21361s / ETA 21480s]
+  [P2  9000/18000] loss=0.8097 lm=1.6004 qa=0.0190 gnorm=2.09 lr=9.0e-05 spd=0.4it/s [21424s / ETA 21424s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 21/21 = 100.0%
+
+  ╔══ EVAL @ step 9000 (Phase 2) ══
+  ║ QA Accuracy: 100.0%  (best: 100.0%)
+  ║ LM loss: 1.6004
+  ║ QA loss: 0.0190
+  ║ Sample: The belief in a produced by the converse refused in the more than the authoritie
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 100.0%)
+  [P2  9025/18000] loss=0.8010 lm=1.6004 qa=0.0016 gnorm=1.17 lr=8.9e-05 spd=0.4it/s [21490s / ETA 21371s]
+  [P2  9050/18000] loss=0.8317 lm=1.6340 qa=0.0294 gnorm=3.66 lr=8.9e-05 spd=0.4it/s [21554s / ETA 21316s]
+  [P2  9075/18000] loss=0.8396 lm=1.6768 qa=0.0024 gnorm=1.29 lr=8.8e-05 spd=0.4it/s [21617s / ETA 21260s]
+  [P2  9100/18000] loss=0.7773 lm=1.5522 qa=0.0024 gnorm=1.25 lr=8.8e-05 spd=0.4it/s [21681s / ETA 21204s]
+  [P2  9125/18000] loss=0.8328 lm=1.6500 qa=0.0155 gnorm=2.29 lr=8.7e-05 spd=0.4it/s [21744s / ETA 21148s]
+  [P2  9150/18000] loss=0.7701 lm=1.5358 qa=0.0045 gnorm=1.45 lr=8.7e-05 spd=0.4it/s [21807s / ETA 21092s]
+  [P2  9175/18000] loss=0.7994 lm=1.5976 qa=0.0012 gnorm=1.24 lr=8.6e-05 spd=0.4it/s [21871s / ETA 21036s]
+  [P2  9200/18000] loss=0.8050 lm=1.5856 qa=0.0244 gnorm=1.85 lr=8.6e-05 spd=0.4it/s [21934s / ETA 20980s]
+  [P2  9225/18000] loss=0.7604 lm=1.5185 qa=0.0023 gnorm=1.27 lr=8.5e-05 spd=0.4it/s [21998s / ETA 20925s]
+  [P2  9250/18000] loss=0.8470 lm=1.6909 qa=0.0032 gnorm=1.46 lr=8.5e-05 spd=0.4it/s [22062s / ETA 20869s]
+  [P2  9275/18000] loss=0.8505 lm=1.6998 qa=0.0012 gnorm=1.15 lr=8.4e-05 spd=0.4it/s [22126s / ETA 20814s]
+  [P2  9300/18000] loss=0.7703 lm=1.5353 qa=0.0053 gnorm=1.64 lr=8.4e-05 spd=0.4it/s [22190s / ETA 20758s]
+  [P2  9325/18000] loss=0.8155 lm=1.6291 qa=0.0018 gnorm=1.23 lr=8.3e-05 spd=0.4it/s [22253s / ETA 20702s]
+  [P2  9350/18000] loss=0.7693 lm=1.5356 qa=0.0029 gnorm=1.37 lr=8.3e-05 spd=0.4it/s [22317s / ETA 20646s]
+  [P2  9375/18000] loss=0.7913 lm=1.5804 qa=0.0023 gnorm=1.26 lr=8.2e-05 spd=0.4it/s [22381s / ETA 20590s]
+  [P2  9400/18000] loss=0.8389 lm=1.6762 qa=0.0016 gnorm=1.56 lr=8.2e-05 spd=0.4it/s [22445s / ETA 20535s]
+  [P2  9425/18000] loss=0.8233 lm=1.6405 qa=0.0060 gnorm=1.32 lr=8.1e-05 spd=0.4it/s [22509s / ETA 20479s]
+  [P2  9450/18000] loss=0.8164 lm=1.6314 qa=0.0013 gnorm=1.37 lr=8.0e-05 spd=0.4it/s [22573s / ETA 20423s]
+  [P2  9475/18000] loss=0.8121 lm=1.6225 qa=0.0017 gnorm=1.35 lr=8.0e-05 spd=0.4it/s [22637s / ETA 20367s]
+  [P2  9500/18000] loss=0.8188 lm=1.6360 qa=0.0015 gnorm=1.24 lr=7.9e-05 spd=0.4it/s [22701s / ETA 20311s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 20/21 = 95.2%
+
+  ╔══ EVAL @ step 9500 (Phase 2) ══
+  ║ QA Accuracy: 99.0%  (best: 100.0%)
+  ║ LM loss: 1.6360
+  ║ QA loss: 0.0015
+  ║ Sample: The events of the solded in the match of political resident of the show and the 
+  ╚════════════════════════════════════════
+
+  [P2  9525/18000] loss=0.8263 lm=1.6518 qa=0.0007 gnorm=1.27 lr=7.9e-05 spd=0.4it/s [22767s / ETA 20257s]
+  [P2  9550/18000] loss=0.7999 lm=1.5867 qa=0.0131 gnorm=2.24 lr=7.8e-05 spd=0.4it/s [22831s / ETA 20201s]
+  [P2  9575/18000] loss=0.7977 lm=1.5916 qa=0.0039 gnorm=1.45 lr=7.8e-05 spd=0.4it/s [22895s / ETA 20145s]
+  [P2  9600/18000] loss=0.9006 lm=1.7961 qa=0.0050 gnorm=1.62 lr=7.7e-05 spd=0.4it/s [22959s / ETA 20089s]
+  [P2  9625/18000] loss=0.8072 lm=1.6120 qa=0.0024 gnorm=1.37 lr=7.7e-05 spd=0.4it/s [23023s / ETA 20033s]
+  [P2  9650/18000] loss=0.8372 lm=1.6736 qa=0.0008 gnorm=1.23 lr=7.6e-05 spd=0.4it/s [23087s / ETA 19977s]
+  [P2  9675/18000] loss=0.7720 lm=1.5429 qa=0.0011 gnorm=1.16 lr=7.6e-05 spd=0.4it/s [23151s / ETA 19921s]
+  [P2  9700/18000] loss=0.8401 lm=1.6796 qa=0.0007 gnorm=1.19 lr=7.5e-05 spd=0.4it/s [23216s / ETA 19865s]
+  [P2  9725/18000] loss=0.8568 lm=1.7122 qa=0.0015 gnorm=1.39 lr=7.5e-05 spd=0.4it/s [23280s / ETA 19809s]
+  [P2  9750/18000] loss=0.8355 lm=1.6699 qa=0.0010 gnorm=1.41 lr=7.4e-05 spd=0.4it/s [23344s / ETA 19753s]
+  [P2  9775/18000] loss=0.8214 lm=1.6418 qa=0.0009 gnorm=1.15 lr=7.4e-05 spd=0.4it/s [23408s / ETA 19696s]
+  [P2  9800/18000] loss=0.8377 lm=1.6747 qa=0.0007 gnorm=1.24 lr=7.3e-05 spd=0.4it/s [23472s / ETA 19640s]
+  [P2  9825/18000] loss=0.8039 lm=1.6069 qa=0.0009 gnorm=1.26 lr=7.3e-05 spd=0.4it/s [23536s / ETA 19584s]
+  [P2  9850/18000] loss=0.7991 lm=1.5975 qa=0.0007 gnorm=1.41 lr=7.2e-05 spd=0.4it/s [23601s / ETA 19527s]
+  [P2  9875/18000] loss=0.8355 lm=1.6691 qa=0.0019 gnorm=1.50 lr=7.2e-05 spd=0.4it/s [23665s / ETA 19471s]
+  [P2  9900/18000] loss=0.8169 lm=1.6331 qa=0.0008 gnorm=1.22 lr=7.1e-05 spd=0.4it/s [23729s / ETA 19415s]
+  [P2  9925/18000] loss=0.7793 lm=1.5571 qa=0.0015 gnorm=1.24 lr=7.1e-05 spd=0.4it/s [23793s / ETA 19358s]
+  [P2  9950/18000] loss=0.8185 lm=1.6330 qa=0.0041 gnorm=1.66 lr=7.0e-05 spd=0.4it/s [23857s / ETA 19302s]
+  [P2  9975/18000] loss=0.8362 lm=1.6707 qa=0.0017 gnorm=1.19 lr=7.0e-05 spd=0.4it/s [23922s / ETA 19245s]
+  [P2 10000/18000] loss=0.7957 lm=1.5897 qa=0.0016 gnorm=1.16 lr=6.9e-05 spd=0.4it/s [23986s / ETA 19189s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 21/21 = 100.0%
+
+  ╔══ EVAL @ step 10000 (Phase 2) ══
+  ║ QA Accuracy: 100.0%  (best: 100.0%)
+  ║ LM loss: 1.5897
+  ║ QA loss: 0.0016
+  ║ Sample: The standard and famous the final process of the first district strong the near 
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 100.0%)
+    ⚠ HF upload failed: 401 Client Error. (Request ID: Root=1-69d5e122-2e9f7d8166a40f3c3d1b7e24;50ec34cf-c4c1-4363-8796-16b2359fd08a)
+
+Repository Not Found for url: https://huggingface.co/api/models/kaaninel/ANT/preupload/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+Invalid username or password.
+Note: Creating a commit assumes that the repo already exists on the Huggingface Hub. Please use `create_repo` if it's not the case.
+  [P2 10025/18000] loss=0.8389 lm=1.6772 qa=0.0007 gnorm=1.38 lr=6.9e-05 spd=0.4it/s [24053s / ETA 19134s]
+  [P2 10050/18000] loss=0.7836 lm=1.5662 qa=0.0010 gnorm=1.49 lr=6.8e-05 spd=0.4it/s [24118s / ETA 19078s]
+  [P2 10075/18000] loss=0.8106 lm=1.6205 qa=0.0007 gnorm=1.61 lr=6.7e-05 spd=0.4it/s [24181s / ETA 19021s]
+  [P2 10100/18000] loss=0.8000 lm=1.5992 qa=0.0008 gnorm=1.31 lr=6.7e-05 spd=0.4it/s [24245s / ETA 18964s]
+  [P2 10125/18000] loss=0.7878 lm=1.5739 qa=0.0018 gnorm=1.19 lr=6.6e-05 spd=0.4it/s [24309s / ETA 18907s]
+  [P2 10150/18000] loss=0.8223 lm=1.6430 qa=0.0017 gnorm=1.52 lr=6.6e-05 spd=0.4it/s [24373s / ETA 18850s]
+  [P2 10175/18000] loss=0.8456 lm=1.6905 qa=0.0008 gnorm=1.46 lr=6.5e-05 spd=0.4it/s [24437s / ETA 18793s]
+  [P2 10200/18000] loss=0.8170 lm=1.6334 qa=0.0005 gnorm=1.23 lr=6.5e-05 spd=0.4it/s [24501s / ETA 18736s]
+  [P2 10225/18000] loss=0.8076 lm=1.6140 qa=0.0012 gnorm=1.30 lr=6.4e-05 spd=0.4it/s [24565s / ETA 18679s]
+  [P2 10250/18000] loss=0.8155 lm=1.6294 qa=0.0017 gnorm=1.32 lr=6.4e-05 spd=0.4it/s [24629s / ETA 18622s]
+  [P2 10275/18000] loss=0.8325 lm=1.6644 qa=0.0005 gnorm=1.42 lr=6.3e-05 spd=0.4it/s [24693s / ETA 18565s]
+  [P2 10300/18000] loss=0.7537 lm=1.5064 qa=0.0010 gnorm=1.23 lr=6.3e-05 spd=0.4it/s [24757s / ETA 18508s]
+  [P2 10325/18000] loss=0.7766 lm=1.5528 qa=0.0005 gnorm=1.30 lr=6.2e-05 spd=0.4it/s [24822s / ETA 18451s]
+  [P2 10350/18000] loss=0.7767 lm=1.5529 qa=0.0005 gnorm=1.18 lr=6.2e-05 spd=0.4it/s [24886s / ETA 18394s]
+  [P2 10375/18000] loss=0.8114 lm=1.6223 qa=0.0006 gnorm=1.27 lr=6.1e-05 spd=0.4it/s [24950s / ETA 18337s]
+  [P2 10400/18000] loss=0.8305 lm=1.6604 qa=0.0006 gnorm=1.41 lr=6.1e-05 spd=0.4it/s [25014s / ETA 18280s]
+  [P2 10425/18000] loss=0.7796 lm=1.5586 qa=0.0006 gnorm=1.24 lr=6.0e-05 spd=0.4it/s [25078s / ETA 18222s]
+  [P2 10450/18000] loss=0.7919 lm=1.5832 qa=0.0005 gnorm=1.13 lr=6.0e-05 spd=0.4it/s [25143s / ETA 18165s]
+  [P2 10475/18000] loss=0.7794 lm=1.5583 qa=0.0005 gnorm=1.31 lr=5.9e-05 spd=0.4it/s [25207s / ETA 18108s]
+  [P2 10500/18000] loss=0.7735 lm=1.5465 qa=0.0006 gnorm=1.30 lr=5.9e-05 spd=0.4it/s [25271s / ETA 18051s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 21/21 = 100.0%
+
+  ╔══ EVAL @ step 10500 (Phase 2) ══
+  ║ QA Accuracy: 100.0%  (best: 100.0%)
+  ║ LM loss: 1.5465
+  ║ QA loss: 0.0006
+  ║ Sample: The can all the operated the increase counter main for several in the country fr
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 100.0%)
+  [P2 10525/18000] loss=0.8388 lm=1.6768 qa=0.0008 gnorm=1.57 lr=5.8e-05 spd=0.4it/s [25338s / ETA 17995s]
+  [P2 10550/18000] loss=0.8062 lm=1.6119 qa=0.0006 gnorm=1.27 lr=5.8e-05 spd=0.4it/s [25402s / ETA 17938s]
+  [P2 10575/18000] loss=0.8306 lm=1.6599 qa=0.0013 gnorm=1.24 lr=5.7e-05 spd=0.4it/s [25467s / ETA 17881s]
+  [P2 10600/18000] loss=0.7749 lm=1.5492 qa=0.0006 gnorm=1.31 lr=5.7e-05 spd=0.4it/s [25531s / ETA 17824s]
+  [P2 10625/18000] loss=0.7505 lm=1.5002 qa=0.0007 gnorm=1.21 lr=5.6e-05 spd=0.4it/s [25596s / ETA 17767s]
+  [P2 10650/18000] loss=0.8118 lm=1.6216 qa=0.0021 gnorm=1.25 lr=5.6e-05 spd=0.4it/s [25661s / ETA 17710s]
+  [P2 10675/18000] loss=0.8592 lm=1.7178 qa=0.0006 gnorm=1.35 lr=5.5e-05 spd=0.4it/s [25726s / ETA 17652s]
+  [P2 10700/18000] loss=0.8269 lm=1.6532 qa=0.0006 gnorm=1.25 lr=5.4e-05 spd=0.4it/s [25790s / ETA 17595s]
+  [P2 10725/18000] loss=0.8078 lm=1.6138 qa=0.0017 gnorm=1.39 lr=5.4e-05 spd=0.4it/s [25854s / ETA 17538s]
+  [P2 10750/18000] loss=0.8061 lm=1.6115 qa=0.0006 gnorm=1.24 lr=5.3e-05 spd=0.4it/s [25919s / ETA 17480s]
+  [P2 10775/18000] loss=0.7908 lm=1.5780 qa=0.0036 gnorm=1.41 lr=5.3e-05 spd=0.4it/s [25983s / ETA 17422s]
+  [P2 10800/18000] loss=0.7900 lm=1.5794 qa=0.0005 gnorm=1.27 lr=5.2e-05 spd=0.4it/s [26047s / ETA 17365s]
+  [P2 10825/18000] loss=0.7945 lm=1.5883 qa=0.0007 gnorm=1.36 lr=5.2e-05 spd=0.4it/s [26112s / ETA 17307s]
+  [P2 10850/18000] loss=0.8260 lm=1.6513 qa=0.0008 gnorm=1.20 lr=5.1e-05 spd=0.4it/s [26176s / ETA 17250s]
+  [P2 10875/18000] loss=0.8031 lm=1.6051 qa=0.0011 gnorm=1.10 lr=5.1e-05 spd=0.4it/s [26240s / ETA 17192s]
+  [P2 10900/18000] loss=0.8123 lm=1.6240 qa=0.0006 gnorm=1.31 lr=5.0e-05 spd=0.4it/s [26304s / ETA 17134s]
+  [P2 10925/18000] loss=0.8200 lm=1.6395 qa=0.0004 gnorm=1.33 lr=5.0e-05 spd=0.4it/s [26368s / ETA 17076s]
+  [P2 10950/18000] loss=0.7913 lm=1.5820 qa=0.0006 gnorm=1.20 lr=4.9e-05 spd=0.4it/s [26433s / ETA 17018s]
+  [P2 10975/18000] loss=0.8410 lm=1.6815 qa=0.0005 gnorm=1.65 lr=4.9e-05 spd=0.4it/s [26497s / ETA 16961s]
+  [P2 11000/18000] loss=0.7912 lm=1.5818 qa=0.0007 gnorm=1.31 lr=4.8e-05 spd=0.4it/s [26561s / ETA 16903s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 21/21 = 100.0%
+
+  ╔══ EVAL @ step 11000 (Phase 2) ══
+  ║ QA Accuracy: 100.0%  (best: 100.0%)
+  ║ LM loss: 1.5818
+  ║ QA loss: 0.0007
+  ║ Sample: The competition and before the first the April 1999 and the board of the first t
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 100.0%)
+  [P2 11025/18000] loss=0.7939 lm=1.5870 qa=0.0008 gnorm=1.19 lr=4.8e-05 spd=0.4it/s [26628s / ETA 16846s]
+  [P2 11050/18000] loss=0.7769 lm=1.5534 qa=0.0004 gnorm=1.26 lr=4.7e-05 spd=0.4it/s [26692s / ETA 16788s]
+  [P2 11075/18000] loss=0.7894 lm=1.5783 qa=0.0004 gnorm=1.44 lr=4.7e-05 spd=0.4it/s [26756s / ETA 16730s]
+  [P2 11100/18000] loss=0.8214 lm=1.6424 qa=0.0004 gnorm=1.32 lr=4.6e-05 spd=0.4it/s [26828s / ETA 16677s]
+  [P2 11125/18000] loss=0.7942 lm=1.5869 qa=0.0016 gnorm=1.42 lr=4.6e-05 spd=0.4it/s [26897s / ETA 16622s]
+  [P2 11150/18000] loss=0.8110 lm=1.6216 qa=0.0005 gnorm=1.28 lr=4.5e-05 spd=0.4it/s [26965s / ETA 16566s]
+  [P2 11175/18000] loss=0.7723 lm=1.5347 qa=0.0098 gnorm=1.91 lr=4.5e-05 spd=0.4it/s [27035s / ETA 16511s]
+  [P2 11200/18000] loss=0.7929 lm=1.5852 qa=0.0007 gnorm=1.33 lr=4.4e-05 spd=0.4it/s [27105s / ETA 16456s]
+  [P2 11225/18000] loss=0.7819 lm=1.5633 qa=0.0005 gnorm=1.37 lr=4.4e-05 spd=0.4it/s [27173s / ETA 16400s]
+  [P2 11250/18000] loss=0.7879 lm=1.5753 qa=0.0004 gnorm=1.42 lr=4.3e-05 spd=0.4it/s [27243s / ETA 16346s]
+  [P2 11275/18000] loss=0.8196 lm=1.6382 qa=0.0010 gnorm=1.34 lr=4.3e-05 spd=0.4it/s [27314s / ETA 16291s]
+  [P2 11300/18000] loss=0.7953 lm=1.5902 qa=0.0004 gnorm=1.27 lr=4.3e-05 spd=0.4it/s [27385s / ETA 16237s]
+  [P2 11325/18000] loss=0.8130 lm=1.6255 qa=0.0004 gnorm=1.24 lr=4.2e-05 spd=0.4it/s [27454s / ETA 16182s]
+  [P2 11350/18000] loss=0.7714 lm=1.5424 qa=0.0003 gnorm=1.21 lr=4.2e-05 spd=0.4it/s [27520s / ETA 16124s]
+  [P2 11375/18000] loss=0.8056 lm=1.6107 qa=0.0004 gnorm=1.38 lr=4.1e-05 spd=0.4it/s [27585s / ETA 16066s]
+  [P2 11400/18000] loss=0.8171 lm=1.6337 qa=0.0006 gnorm=1.39 lr=4.1e-05 spd=0.4it/s [27649s / ETA 16008s]
+  [P2 11425/18000] loss=0.7739 lm=1.5474 qa=0.0004 gnorm=1.46 lr=4.0e-05 spd=0.4it/s [27714s / ETA 15949s]
+  [P2 11450/18000] loss=0.7984 lm=1.5963 qa=0.0005 gnorm=1.22 lr=4.0e-05 spd=0.4it/s [27782s / ETA 15893s]
+  [P2 11475/18000] loss=0.7770 lm=1.5531 qa=0.0009 gnorm=1.30 lr=3.9e-05 spd=0.4it/s [27847s / ETA 15834s]
+  [P2 11500/18000] loss=0.7681 lm=1.5355 qa=0.0007 gnorm=1.16 lr=3.9e-05 spd=0.4it/s [27913s / ETA 15777s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 21/21 = 100.0%
+
+  ╔══ EVAL @ step 11500 (Phase 2) ══
+  ║ QA Accuracy: 100.0%  (best: 100.0%)
+  ║ LM loss: 1.5355
+  ║ QA loss: 0.0007
+  ║ Sample: The extreme the particular play was the political concern for belong the sale in
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 100.0%)
+  [P2 11525/18000] loss=0.7974 lm=1.5945 qa=0.0004 gnorm=1.36 lr=3.8e-05 spd=0.3it/s [27992s / ETA 15727s]
+  [P2 11550/18000] loss=0.7647 lm=1.5290 qa=0.0004 gnorm=1.34 lr=3.8e-05 spd=0.3it/s [28063s / ETA 15672s]
+  [P2 11575/18000] loss=0.8117 lm=1.6230 qa=0.0005 gnorm=1.40 lr=3.7e-05 spd=0.4it/s [28133s / ETA 15616s]
+  [P2 11600/18000] loss=0.7695 lm=1.5383 qa=0.0007 gnorm=1.27 lr=3.7e-05 spd=0.3it/s [28207s / ETA 15562s]
+  [P2 11625/18000] loss=0.8130 lm=1.6235 qa=0.0026 gnorm=1.45 lr=3.6e-05 spd=0.3it/s [28282s / ETA 15510s]
+  [P2 11650/18000] loss=0.8133 lm=1.6259 qa=0.0007 gnorm=1.20 lr=3.6e-05 spd=0.3it/s [28355s / ETA 15455s]
+  [P2 11675/18000] loss=0.7647 lm=1.5285 qa=0.0008 gnorm=1.14 lr=3.5e-05 spd=0.3it/s [28427s / ETA 15401s]
+  [P2 11700/18000] loss=0.7730 lm=1.5453 qa=0.0006 gnorm=1.27 lr=3.5e-05 spd=0.3it/s [28500s / ETA 15346s]
+  [P2 11725/18000] loss=0.7560 lm=1.5116 qa=0.0004 gnorm=1.45 lr=3.5e-05 spd=0.3it/s [28574s / ETA 15292s]
+  [P2 11750/18000] loss=0.7627 lm=1.5240 qa=0.0015 gnorm=1.25 lr=3.4e-05 spd=0.3it/s [28648s / ETA 15238s]
+  [P2 11775/18000] loss=0.8505 lm=1.7004 qa=0.0005 gnorm=1.40 lr=3.4e-05 spd=0.3it/s [28723s / ETA 15185s]
+  [P2 11800/18000] loss=0.8334 lm=1.6661 qa=0.0007 gnorm=1.41 lr=3.3e-05 spd=0.3it/s [28797s / ETA 15131s]
+  [P2 11825/18000] loss=0.8207 lm=1.6409 qa=0.0006 gnorm=1.21 lr=3.3e-05 spd=0.3it/s [28871s / ETA 15076s]
+  [P2 11850/18000] loss=0.8082 lm=1.6154 qa=0.0009 gnorm=1.45 lr=3.2e-05 spd=0.3it/s [28948s / ETA 15024s]
+  [P2 11875/18000] loss=0.7929 lm=1.5854 qa=0.0004 gnorm=1.27 lr=3.2e-05 spd=0.3it/s [29018s / ETA 14967s]
+  [P2 11900/18000] loss=0.7777 lm=1.5550 qa=0.0004 gnorm=1.39 lr=3.1e-05 spd=0.3it/s [29095s / ETA 14914s]
+  [P2 11925/18000] loss=0.7848 lm=1.5692 qa=0.0003 gnorm=1.37 lr=3.1e-05 spd=0.3it/s [29172s / ETA 14861s]
+  [P2 11950/18000] loss=0.7836 lm=1.5668 qa=0.0003 gnorm=1.11 lr=3.1e-05 spd=0.3it/s [29247s / ETA 14807s]
+  [P2 11975/18000] loss=0.8010 lm=1.6015 qa=0.0004 gnorm=1.34 lr=3.0e-05 spd=0.3it/s [29315s / ETA 14749s]
+  [P2 12000/18000] loss=0.8121 lm=1.6239 qa=0.0004 gnorm=1.39 lr=3.0e-05 spd=0.4it/s [29384s / ETA 14692s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 21/21 = 100.0%
+
+  ╔══ EVAL @ step 12000 (Phase 2) ══
+  ║ QA Accuracy: 100.0%  (best: 100.0%)
+  ║ LM loss: 1.6239
+  ║ QA loss: 0.0004
+  ║ Sample: The first are a stress in the activity contemporary that include of the transfor
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 100.0%)
+    ⚠ HF upload failed: 401 Client Error. (Request ID: Root=1-69d5f638-52b64bd17814b70a1f128e48;c1449ee7-d8f9-4a5f-bedc-f403330e63a7)
+
+Repository Not Found for url: https://huggingface.co/api/models/kaaninel/ANT/preupload/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+Invalid username or password.
+Note: Creating a commit assumes that the repo already exists on the Huggingface Hub. Please use `create_repo` if it's not the case.
+  [P2 12025/18000] loss=0.7932 lm=1.5859 qa=0.0005 gnorm=1.37 lr=2.9e-05 spd=0.4it/s [29458s / ETA 14637s]
+  [P2 12050/18000] loss=0.7788 lm=1.5570 qa=0.0006 gnorm=1.44 lr=2.9e-05 spd=0.3it/s [29534s / ETA 14583s]
+  [P2 12075/18000] loss=0.8060 lm=1.6116 qa=0.0005 gnorm=1.38 lr=2.8e-05 spd=0.3it/s [29611s / ETA 14530s]
+  [P2 12100/18000] loss=0.7793 lm=1.5580 qa=0.0006 gnorm=1.24 lr=2.8e-05 spd=0.3it/s [29682s / ETA 14473s]
+  [P2 12125/18000] loss=0.7385 lm=1.4764 qa=0.0005 gnorm=1.26 lr=2.8e-05 spd=0.4it/s [29751s / ETA 14415s]
+  [P2 12150/18000] loss=0.7373 lm=1.4740 qa=0.0006 gnorm=1.54 lr=2.7e-05 spd=0.4it/s [29824s / ETA 14360s]
+  [P2 12175/18000] loss=0.8110 lm=1.6214 qa=0.0005 gnorm=1.33 lr=2.7e-05 spd=0.3it/s [29898s / ETA 14304s]
+  [P2 12200/18000] loss=0.7949 lm=1.5894 qa=0.0004 gnorm=1.29 lr=2.6e-05 spd=0.3it/s [29971s / ETA 14248s]
+  [P2 12225/18000] loss=0.8310 lm=1.6617 qa=0.0004 gnorm=1.29 lr=2.6e-05 spd=0.3it/s [30041s / ETA 14191s]
+  [P2 12250/18000] loss=0.8087 lm=1.6166 qa=0.0008 gnorm=1.26 lr=2.6e-05 spd=0.3it/s [30119s / ETA 14137s]
+  [P2 12275/18000] loss=0.8549 lm=1.7094 qa=0.0004 gnorm=1.40 lr=2.5e-05 spd=0.3it/s [30196s / ETA 14083s]
+  [P2 12300/18000] loss=0.7702 lm=1.5397 qa=0.0007 gnorm=1.23 lr=2.5e-05 spd=0.3it/s [30267s / ETA 14026s]
+  [P2 12325/18000] loss=0.8814 lm=1.7624 qa=0.0005 gnorm=1.39 lr=2.4e-05 spd=0.4it/s [30334s / ETA 13967s]
+  [P2 12350/18000] loss=0.7919 lm=1.5834 qa=0.0004 gnorm=1.47 lr=2.4e-05 spd=0.3it/s [30413s / ETA 13914s]
+  [P2 12375/18000] loss=0.8057 lm=1.6111 qa=0.0004 gnorm=1.15 lr=2.4e-05 spd=0.3it/s [30489s / ETA 13859s]
+  [P2 12400/18000] loss=0.7996 lm=1.5987 qa=0.0005 gnorm=1.39 lr=2.3e-05 spd=0.3it/s [30564s / ETA 13803s]
+  [P2 12425/18000] loss=0.7822 lm=1.5637 qa=0.0006 gnorm=1.40 lr=2.3e-05 spd=0.3it/s [30640s / ETA 13748s]
+  [P2 12450/18000] loss=0.7699 lm=1.5395 qa=0.0003 gnorm=1.29 lr=2.2e-05 spd=0.3it/s [30715s / ETA 13692s]
+  [P2 12475/18000] loss=0.7684 lm=1.5365 qa=0.0004 gnorm=1.10 lr=2.2e-05 spd=0.3it/s [30791s / ETA 13637s]
+  [P2 12500/18000] loss=0.7742 lm=1.5482 qa=0.0002 gnorm=1.22 lr=2.2e-05 spd=0.3it/s [30868s / ETA 13582s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 21/21 = 100.0%
+
+  ╔══ EVAL @ step 12500 (Phase 2) ══
+  ║ QA Accuracy: 100.0%  (best: 100.0%)
+  ║ LM loss: 1.5482
+  ║ QA loss: 0.0002
+  ║ Sample: The first can manager and proposed a concentration for the bases from the made t
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 100.0%)
+  [P2 12525/18000] loss=0.8026 lm=1.6047 qa=0.0004 gnorm=1.30 lr=2.1e-05 spd=0.3it/s [30949s / ETA 13529s]
+  [P2 12550/18000] loss=0.7726 lm=1.5443 qa=0.0008 gnorm=1.27 lr=2.1e-05 spd=0.3it/s [31028s / ETA 13474s]
+  [P2 12575/18000] loss=0.7985 lm=1.5964 qa=0.0005 gnorm=1.34 lr=2.1e-05 spd=0.3it/s [31108s / ETA 13420s]
+  [P2 12600/18000] loss=0.8095 lm=1.6181 qa=0.0009 gnorm=1.65 lr=2.0e-05 spd=0.3it/s [31197s / ETA 13370s]
+  [P2 12625/18000] loss=0.7923 lm=1.5838 qa=0.0007 gnorm=1.43 lr=2.0e-05 spd=0.3it/s [31282s / ETA 13318s]
+  [P2 12650/18000] loss=0.8853 lm=1.7701 qa=0.0006 gnorm=1.42 lr=2.0e-05 spd=0.3it/s [31363s / ETA 13264s]
+  [P2 12675/18000] loss=0.7884 lm=1.5765 qa=0.0004 gnorm=1.13 lr=1.9e-05 spd=0.3it/s [31446s / ETA 13211s]
+  [P2 12700/18000] loss=0.8414 lm=1.6822 qa=0.0006 gnorm=1.29 lr=1.9e-05 spd=0.3it/s [31522s / ETA 13155s]
+  [P2 12725/18000] loss=0.8339 lm=1.6674 qa=0.0005 gnorm=1.45 lr=1.8e-05 spd=0.3it/s [31595s / ETA 13097s]
+  [P2 12750/18000] loss=0.7978 lm=1.5952 qa=0.0004 gnorm=1.22 lr=1.8e-05 spd=0.3it/s [31670s / ETA 13040s]
+  [P2 12775/18000] loss=0.7741 lm=1.5478 qa=0.0004 gnorm=1.30 lr=1.8e-05 spd=0.3it/s [31745s / ETA 12984s]
+  [P2 12800/18000] loss=0.7473 lm=1.4942 qa=0.0004 gnorm=1.15 lr=1.7e-05 spd=0.3it/s [31824s / ETA 12928s]
+  [P2 12825/18000] loss=0.7854 lm=1.5705 qa=0.0004 gnorm=1.26 lr=1.7e-05 spd=0.3it/s [31899s / ETA 12871s]
+  [P2 12850/18000] loss=0.8179 lm=1.6355 qa=0.0003 gnorm=1.45 lr=1.7e-05 spd=0.3it/s [31972s / ETA 12814s]
+  [P2 12875/18000] loss=0.8410 lm=1.6816 qa=0.0003 gnorm=1.50 lr=1.6e-05 spd=0.4it/s [32041s / ETA 12754s]
+  [P2 12900/18000] loss=0.7580 lm=1.5153 qa=0.0006 gnorm=1.27 lr=1.6e-05 spd=0.4it/s [32106s / ETA 12693s]
+  [P2 12925/18000] loss=0.8113 lm=1.6224 qa=0.0002 gnorm=1.33 lr=1.6e-05 spd=0.4it/s [32177s / ETA 12634s]
+  [P2 12950/18000] loss=0.8176 lm=1.6349 qa=0.0003 gnorm=1.21 lr=1.5e-05 spd=0.4it/s [32243s / ETA 12573s]
+  [P2 12975/18000] loss=0.7698 lm=1.5392 qa=0.0004 gnorm=1.33 lr=1.5e-05 spd=0.4it/s [32313s / ETA 12514s]
+  [P2 13000/18000] loss=0.7813 lm=1.5621 qa=0.0005 gnorm=1.40 lr=1.5e-05 spd=0.4it/s [32384s / ETA 12455s]
+    1-fact: 42/42 = 100.0%
+    2-fact: 37/37 = 100.0%
+    3-fact: 21/21 = 100.0%
+
+  ╔══ EVAL @ step 13000 (Phase 2) ══
+  ║ QA Accuracy: 100.0%  (best: 100.0%)
+  ║ LM loss: 1.5621
+  ║ QA loss: 0.0005
+  ║ Sample: The conditions and a personal and prediction was made from the first so most sho
+  ╚════════════════════════════════════════
+
+  ✓ Best checkpoint saved (QA: 100.0%)
+  [P2 13025/18000] loss=0.7924 lm=1.5845 qa=0.0004 gnorm=1.35 lr=1.5e-05 spd=0.3it/s [32461s / ETA 12399s]
+  [P2 13050/18000] loss=0.8131 lm=1.6258 qa=0.0004 gnorm=1.33 lr=1.4e-05 spd=0.3it/s [32533s / ETA 12340s]
+  [P2 13075/18000] loss=0.7550 lm=1.5095 qa=0.0004 gnorm=1.19 lr=1.4e-05 spd=0.3it/s [32607s / ETA 12282s]
+  [P2 13100/18000] loss=0.7352 lm=1.4701 qa=0.0002 gnorm=1.14 lr=1.4e-05 spd=0.3it/s [32678s / ETA 12223s]
+  [P2 13125/18000] loss=0.8129 lm=1.6256 qa=0.0003 gnorm=1.40 lr=1.3e-05 spd=0.3it/s [32751s / ETA 12165s]
+  [P2 13150/18000] loss=0.8232 lm=1.6462 qa=0.0003 gnorm=1.23 lr=1.3e-05 spd=0.3it/s [32831s / ETA 12109s]

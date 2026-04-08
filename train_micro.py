@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ANT — Addressable Neural Transformer (828K params) with persistent memory.
+ANT (828K params) — byte-level transformer with persistent external memory.
 
 Self-contained training pipeline: tokenizer, datasets, encoders, training, evaluation.
 Achieves 99.5% QA accuracy on bAbI memory tasks while simultaneously learning LM.
@@ -754,10 +754,13 @@ def _generate_fallback_diverse_text(n: int, seed: int = 42) -> list[str]:
 class TextLMDataset(Dataset):
     """
     Autoregressive LM dataset from raw text strings.
-    Each sample: <bos> text_bytes <eos> (padded to max_len).
-    Shifted targets: loss computed on all non-padding positions.
+    Each sample: <bos> text_bytes <eos> stored at natural length.
+
+    When max_len is given, sequences longer than max_len are truncated.
+    No zero-padding is done here — use lm_collate_fn to pad to batch maximum.
+    This keeps RAM usage proportional to actual text length, not some fixed cap.
     """
-    def __init__(self, texts: list[str], max_len: int = 192):
+    def __init__(self, texts: list[str], max_len: int | None = None):
         self.samples = []
         pad = PAD_ID
         bos = BOS_ID
@@ -766,15 +769,11 @@ class TextLMDataset(Dataset):
         for text in texts:
             text_ids = tokenize(text)
             full_seq = [bos] + text_ids + [eos]
-            if len(full_seq) > max_len + 1:
+            if max_len is not None and len(full_seq) > max_len + 1:
                 full_seq = full_seq[:max_len + 1]
 
             inp_ids = full_seq[:-1]
             tgt_ids = full_seq[1:]
-
-            while len(inp_ids) < max_len:
-                inp_ids.append(pad)
-                tgt_ids.append(pad)
 
             self.samples.append((
                 torch.tensor(inp_ids, dtype=torch.long),
@@ -788,9 +787,165 @@ class TextLMDataset(Dataset):
         return self.samples[idx]
 
 
-# ============================================================================
-# PyTorch Datasets
-# ============================================================================
+def lm_collate_fn(batch, pad_id: int = PAD_ID):
+    """Collate variable-length LM samples by padding to the batch maximum."""
+    max_len = max(inp.size(0) for inp, _ in batch)
+    inp_batch, tgt_batch = [], []
+    for inp, tgt in batch:
+        n = inp.size(0)
+        pad_n = max_len - n
+        inp_batch.append(torch.cat([inp, inp.new_full((pad_n,), pad_id)]))
+        tgt_batch.append(torch.cat([tgt, tgt.new_full((pad_n,), pad_id)]))
+    return torch.stack(inp_batch), torch.stack(tgt_batch)
+
+
+class ChatMemoryDataset(Dataset):
+    """Chat dataset for memory-based training.
+
+    Splits tagged chat exchanges into (user_content, agent_line) pairs.
+    During training, user_content is encoded into memory via cross-attention,
+    and agent_line is processed through the sliding window with that memory.
+
+    This solves the receptive field problem: with W=8 passes=1, each generated
+    token only sees 5 bytes behind it — not enough to see past the agent tag
+    to the user's question. Memory cross-attention has no distance limitation,
+    so the model can always "see" what the user asked.
+
+    Input format:  "localhost/user/chat@ts: question\\nlocalhost/ant/chat@ts: answer"
+    Stores:        user_content = "question"  (for memory encoding)
+                   agent_line   = "localhost/ant/chat@ts: answer"  (for sliding window)
+    """
+    def __init__(self, chat_texts, max_user_tokens=190):
+        self.user_content_ids = []
+        self.agent_line_ids = []
+
+        # encode_sentence_memory uses model() which has RoPE precomputed for
+        # max_seq_len + n_mem_positions = 203 positions. Input is [BOS] + tokens,
+        # so user content must be ≤ 190 tokens to stay within RoPE bounds.
+        for text in chat_texts:
+            parts = text.split('\n', 1)
+            if len(parts) < 2:
+                continue
+
+            user_line = parts[0]  # "localhost/user/chat@ts: question"
+            agent_line = parts[1]  # "localhost/ant/chat@ts: answer"
+
+            # Extract user content (strip tag prefix)
+            colon_pos = user_line.find(': ')
+            user_content = user_line[colon_pos + 2:] if colon_pos >= 0 else user_line
+
+            if len(user_content) < 2 or len(agent_line) < 10:
+                continue
+
+            user_ids = tokenize(user_content)[:max_user_tokens]
+            self.user_content_ids.append(
+                torch.tensor(user_ids, dtype=torch.long))
+            self.agent_line_ids.append(
+                torch.tensor(tokenize(agent_line), dtype=torch.long))
+
+    def __len__(self):
+        return len(self.user_content_ids)
+
+    def __getitem__(self, idx):
+        return self.user_content_ids[idx], self.agent_line_ids[idx]
+
+
+def chat_memory_collate_fn(batch):
+    """Collate for ChatMemoryDataset — pads user and agent sequences separately.
+
+    Returns:
+        user_padded: (B, max_user_len) — for memory encoding
+        agent_inp:   (B, max_agent_len+1) — [BOS, agent_bytes...] for sliding window
+        agent_tgt:   (B, max_agent_len+1) — [agent_bytes..., EOS] for loss
+    """
+    pad = PAD_ID
+    bos = BOS_ID
+    eos = EOS_ID
+
+    user_list, agent_list = zip(*batch)
+
+    # Pad user sequences for batched memory encoding
+    max_u = max(u.size(0) for u in user_list)
+    user_padded = torch.full((len(batch), max_u), pad, dtype=torch.long)
+    for i, u in enumerate(user_list):
+        user_padded[i, :u.size(0)] = u
+
+    # Agent: input = [BOS, agent_bytes...], target = [agent_bytes..., EOS]
+    max_a = max(a.size(0) for a in agent_list)
+    agent_inp = torch.full((len(batch), max_a + 1), pad, dtype=torch.long)
+    agent_tgt = torch.full((len(batch), max_a + 1), pad, dtype=torch.long)
+    for i, a in enumerate(agent_list):
+        agent_inp[i, 0] = bos
+        agent_inp[i, 1:1 + a.size(0)] = a
+        agent_tgt[i, :a.size(0)] = a
+        agent_tgt[i, a.size(0)] = eos
+
+    return user_padded, agent_inp, agent_tgt
+
+
+class TokenBudgetLoader:
+    """Infinite iterator over TextLMDataset with token-budget batching.
+
+    Instead of a fixed batch size, each yielded batch contains as many
+    sequences as fit within `token_budget` total tokens. This keeps the
+    per-step sliding-window computation constant regardless of sequence length:
+    - Short sequences (100 tok): ~40 sequences per batch at budget=4096
+    - Long sequences (2000 tok): ~2 sequences per batch at budget=4096
+
+    RAM and compute stay proportional to token_budget, not sequence length.
+    Sequences are shuffled then sorted by length in buckets to minimize padding.
+    """
+    def __init__(self, dataset: 'TextLMDataset', token_budget: int = 4096,
+                 pad_id: int = PAD_ID):
+        self.dataset = dataset
+        self.token_budget = token_budget
+        self.pad_id = pad_id
+        self._build_order()
+
+    def _build_order(self):
+        # Shuffle then sort by length in bins of 8 (reduces padding waste)
+        indices = list(range(len(self.dataset)))
+        random.shuffle(indices)
+        # Sort within blocks of 256 to balance shuffle vs padding efficiency
+        block = 256
+        sorted_indices = []
+        for i in range(0, len(indices), block):
+            chunk = indices[i:i + block]
+            chunk.sort(key=lambda j: self.dataset[j][0].size(0))
+            sorted_indices.extend(chunk)
+        self._order = sorted_indices
+        self._pos = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._pos >= len(self._order):
+            self._build_order()  # reshuffle on exhaustion
+
+        batch_indices = []
+        max_len_in_batch = 0
+        while self._pos < len(self._order):
+            idx = self._order[self._pos]
+            seq_len = self.dataset[idx][0].size(0)
+            new_max = max(max_len_in_batch, seq_len)
+            # Would this sequence push total tokens over budget?
+            if batch_indices and new_max * (len(batch_indices) + 1) > self.token_budget:
+                break
+            batch_indices.append(idx)
+            max_len_in_batch = new_max
+            self._pos += 1
+
+        if not batch_indices:
+            # Single sequence that alone exceeds budget — yield it anyway
+            idx = self._order[self._pos]
+            batch_indices = [idx]
+            self._pos += 1
+
+        batch = [self.dataset[i] for i in batch_indices]
+        return lm_collate_fn(batch, self.pad_id)
+
+
 
 class ContextQADataset(Dataset):
     """
@@ -1995,33 +2150,39 @@ def evaluate_sliding_lm(model, cfg, examples, device, max_examples=200,
 # ============================================================================
 
 @torch.no_grad()
-def sliding_generate(model, prompt_ids, max_new_tokens=256,
+def sliding_generate(model, prompt_ids, max_new_tokens=2048,
                      temperature=0.8, top_k=40, top_p=0.9,
+                     repetition_penalty=1.0,
                      window_size=8, num_passes=4,
                      mem_keys=None, mem_vals=None, mem_mask=None,
-                     stop_token=None, callback=None):
+                     stop_token=None, stop_strings=None, callback=None):
     """
     Autoregressive generation using causal sliding windows.
 
-    At each step, runs full causal sliding_lm_encode over the entire sequence,
-    takes the last hidden state, projects to logits, and samples.
+    Uses a rolling context buffer of size `window_size * num_passes * 4` tokens.
+    Only the tail of the sequence is re-encoded each step, making generation
+    O(1) per token rather than O(T²).
 
-    This gives every generated token access to:
-    - Local context (~half_w * num_passes tokens back) via causal sliding
+    Every generated token has access to:
+    - Local context (rolling buffer, last ~W*passes*4 tokens) via causal sliding
     - Global knowledge (all stored facts) via memory cross-attention
     - Multi-pass refinement of representations
+
+    Output length is bounded only by max_new_tokens — no fixed sequence cap.
 
     Args:
         model: ANT model
         prompt_ids: list of token IDs for the prompt
-        max_new_tokens: maximum tokens to generate
+        max_new_tokens: maximum NEW tokens to generate (no upper limit in principle)
         temperature: sampling temperature (0 = greedy)
         top_k: top-k filtering (0 = no filtering)
         top_p: nucleus sampling threshold (1.0 = no filtering)
+        repetition_penalty: penalise tokens seen in last 50 generated tokens (1.0=off)
         window_size: sliding window size
         num_passes: number of refinement passes
         mem_keys/vals/mask: optional memory for cross-attention
         stop_token: stop generation at this token (default: EOS)
+        stop_strings: list of byte-strings; stop and truncate if output ends with any
         callback: optional function called with each new token id
 
     Returns:
@@ -2031,17 +2192,38 @@ def sliding_generate(model, prompt_ids, max_new_tokens=256,
         stop_token = EOS_ID
     model.eval()
     device = next(model.parameters()).device
-    tokens = list(prompt_ids)
+
+    # Rolling context: keep enough tokens so the sliding window has full receptive field.
+    # Receptive field = half_w * num_passes tokens behind current position.
+    # Minimum 128 tokens so short prompts (tags + question) are never truncated.
+    max_ctx = max(window_size * num_passes * 4, 128)
+    full_tokens = list(prompt_ids)  # kept for return value
+    ctx_tokens = list(prompt_ids)   # rolling buffer for encoding
+    generated_bytes = bytearray()   # accumulated output for stop_strings detection
 
     for _ in range(max_new_tokens):
-        inp = torch.tensor([tokens], dtype=torch.long, device=device)
-        hidden = sliding_lm_encode(
-            model, inp, window_size, num_passes,
-            mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask,
-            causal=True)
+        # Trim context to rolling buffer size
+        if len(ctx_tokens) > max_ctx:
+            ctx_tokens = ctx_tokens[-max_ctx:]
+
+        inp = torch.tensor([ctx_tokens], dtype=torch.long, device=device)
+        with torch.no_grad():
+            hidden = sliding_lm_encode(
+                model, inp, window_size, num_passes,
+                mem_keys=mem_keys, mem_vals=mem_vals, mem_mask=mem_mask,
+                causal=True)
 
         # Logits at last position
         logits = F.linear(hidden[:, -1:, :], model.embed.weight).squeeze(0).squeeze(0)
+
+        # Repetition penalty: penalise tokens recently generated
+        if repetition_penalty != 1.0:
+            recent = set(full_tokens[-50:])
+            for tok_id in recent:
+                if logits[tok_id] > 0:
+                    logits[tok_id] /= repetition_penalty
+                else:
+                    logits[tok_id] *= repetition_penalty
 
         # Temperature scaling
         if temperature > 0 and temperature != 1.0:
@@ -2072,11 +2254,26 @@ def sliding_generate(model, prompt_ids, max_new_tokens=256,
         if next_tok == stop_token:
             break
 
-        tokens.append(next_tok)
+        full_tokens.append(next_tok)
+        ctx_tokens.append(next_tok)
+
+        # Stop-string detection: accumulate output bytes and check suffixes
+        if stop_strings:
+            generated_bytes.append(next_tok)
+            tail = bytes(generated_bytes[-64:])  # check last 64 bytes only
+            if any(tail.endswith(s.encode() if isinstance(s, str) else s)
+                   for s in stop_strings):
+                # Trim the stop string from full_tokens
+                n_trim = max(len(s) for s in stop_strings
+                             if tail.endswith(s.encode() if isinstance(s, str) else s))
+                full_tokens = full_tokens[:-n_trim]
+                break
+
         if callback:
             callback(next_tok)
 
-    return tokens
+    return full_tokens
+
 
 
 def train_sliding_lm(model, cfg, device, train_examples, val_examples,
@@ -3000,7 +3197,7 @@ _CHAT_GREETINGS = [
     ("Hey", "Hey! What's up?"),
     ("Good evening", "Good evening! How can I assist you?"),
     ("How are you?", "I'm doing well, thank you for asking!"),
-    ("What's your name?", "I'm ANT, an Addressable Neural Transformer."),
+    ("What's your name?", "I'm ANT, a compact language model with persistent memory."),
     ("Thanks!", "You're welcome!"),
     ("Thank you very much", "Happy to help!"),
     ("Goodbye", "Goodbye! Have a great day!"),
@@ -3084,6 +3281,149 @@ _CHAT_MARKDOWN = [
 ]
 
 
+def load_hf_chat_data(n: int = 20000, seed: int = 42,
+                      cache_dir: str = "data_cache",
+                      max_seq_bytes: int = 600) -> list[str]:
+    """Load curated conversational data from HuggingFace.
+
+    Sources (tried in order until n pairs collected):
+      1. HuggingFaceH4/ultrachat_200k
+      2. HuggingFaceTB/smoltalk
+
+    Filtering strategy — "teach patterns, not facts":
+      - English only (ASCII-dominant heuristic)
+      - Total sequence ≤ max_seq_bytes (tags + question + answer).
+        600 bytes = ~3-4 sentences, appropriate for sub-1M param model.
+        The sliding window handles any length at inference; the cap is only
+        a training RAM budget knob.
+      - Assistant response ≥ 20 chars
+      - Skip answers that are pure fact dumps:
+          * > 8 capitalized words (named entities)
+          * > 3 standalone 4-digit numbers (years/IDs)
+      - Keep procedural, reasoning, and social responses
+
+    Falls back to generate_chat_data() if HF unavailable.
+    """
+    import os, re
+
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"hf_chat_{n}_{max_seq_bytes}b.txt")
+    if os.path.exists(cache_path):
+        print(f"  Loading cached HF chat data from {cache_path}")
+        # Reconstruct user+agent pairs: each pair starts with "localhost/user/"
+        # Agent responses may contain embedded newlines, so we group lines.
+        with open(cache_path, encoding="utf-8") as f:
+            raw_lines = [l.rstrip("\n") for l in f]
+        pairs = []
+        current = []
+        for line in raw_lines:
+            if line.startswith("localhost/user/") and current:
+                pairs.append("\n".join(current))
+                current = [line]
+            elif line.strip():
+                current.append(line)
+        if current:
+            pairs.append("\n".join(current))
+        return pairs
+
+    print(f"  Downloading HF chat data (target {n} pairs, max {max_seq_bytes} bytes/seq)...")
+
+    # Heuristic: count how "fact-heavy" a text is
+    _cap_word = re.compile(r'\b[A-Z][a-z]{2,}\b')
+    _year_num = re.compile(r'\b(1[0-9]{3}|20[0-2][0-9])\b')
+
+    # Tag overhead: "localhost/user/chat@2025-01-01T00:00:00Z: \nlocalhost/ant/chat@2025-01-01T00:00:00Z: "
+    TAG_OVERHEAD = 90  # conservative upper bound in bytes
+
+    def is_fact_heavy(text: str) -> bool:
+        caps = len(_cap_word.findall(text))
+        years = len(_year_num.findall(text))
+        return caps > 8 or years > 3
+
+    def is_ascii_dominant(text: str) -> bool:
+        ascii_count = sum(1 for c in text if ord(c) < 128)
+        return ascii_count / max(len(text), 1) > 0.85
+
+    def extract_pairs(messages: list[dict]) -> list[tuple[str, str]]:
+        """Extract all consecutive user/assistant pairs from a conversation."""
+        pairs = []
+        for i in range(len(messages) - 1):
+            if messages[i]["role"] == "user" and messages[i + 1]["role"] == "assistant":
+                q = messages[i]["content"].strip()
+                a = messages[i + 1]["content"].strip()
+                pairs.append((q, a))
+        return pairs
+
+    random.seed(seed)
+    results = []
+
+    sources = [
+        ("HuggingFaceH4/ultrachat_200k", {"split": "train_sft"}),
+        ("HuggingFaceTB/smoltalk", {"name": "all", "split": "train"}),
+    ]
+
+    max_content_bytes = max_seq_bytes - TAG_OVERHEAD  # budget for q + "\n" + a
+
+    try:
+        from datasets import load_dataset
+        for ds_name, ds_kwargs in sources:
+            if len(results) >= n:
+                break
+            print(f"    Streaming {ds_name}...")
+            try:
+                ds = load_dataset(ds_name, **ds_kwargs, streaming=True)
+                for ex in ds:
+                    if len(results) >= n:
+                        break
+                    messages = ex.get("messages", [])
+                    if not messages:
+                        continue
+                    for q, a in extract_pairs(messages):
+                        if len(results) >= n:
+                            break
+                        q_bytes = len(q.encode("utf-8"))
+                        a_bytes = len(a.encode("utf-8"))
+                        # Skip too short, or combined content exceeds budget
+                        if a_bytes < 20 or q_bytes + a_bytes > max_content_bytes:
+                            continue
+                        # Language filter
+                        if not is_ascii_dominant(q) or not is_ascii_dominant(a):
+                            continue
+                        # Fact filter
+                        if is_fact_heavy(a):
+                            continue
+                        results.append((q, a))
+            except Exception as e:
+                print(f"    Warning: failed to load {ds_name}: {e}")
+
+    except ImportError:
+        print("  datasets not installed, falling back to synthetic data")
+
+    if len(results) < max(10, n // 4):
+        print(f"  HF data insufficient ({len(results)}), using synthetic fallback")
+        return generate_chat_data(n, seed)
+
+    print(f"  Collected {len(results)} chat pairs from HF")
+
+    # Convert to tagged format — sequences already fit within max_seq_bytes
+    # (filtered at collection time), so no truncation needed here.
+    tagged = []
+    for q, a in results:
+        user_ts = _random_timestamp()
+        user_tag = f"localhost/user/chat@{user_ts}"
+        agent_tag = f"localhost/ant/chat@{user_ts}"
+        text = f"{user_tag}: {q}\n{agent_tag}: {a}"
+        tagged.append(text)
+
+    random.shuffle(tagged)
+
+    with open(cache_path, "w", encoding="utf-8") as f:
+        for t in tagged:
+            f.write(t + "\n")
+    print(f"  Cached {len(tagged)} tagged pairs to {cache_path}")
+    return tagged
+
+
 def generate_chat_data(n: int = 5000, seed: int = 42) -> list[str]:
     """Generate diverse chat training pairs in tagged format.
 
@@ -3147,6 +3487,7 @@ def train_chat(model, cfg, device, output_dir,
                window_size=8, num_passes=4, stride=1,
                n_wiki=50000, n_shell=5000, n_qa=20000, n_chat=5000,
                use_bf16=False, use_compile=False,
+               use_hf_chat=False,
                hf_repo=None, hf_upload_interval=1000):
     """
     3-phase chat training using CAUSAL sliding windows for all losses.
@@ -3192,7 +3533,7 @@ def train_chat(model, cfg, device, output_dir,
     print(f"    Wikipedia: {len(wiki_texts)} sentences")
     shell_texts = generate_shell_texts(n_shell, seed=42)
     print(f"    Shell:     {len(shell_texts)} commands")
-    chat_texts = generate_chat_data(n_chat, seed=42)
+    chat_texts = load_hf_chat_data(n_chat, seed=42) if use_hf_chat else generate_chat_data(n_chat, seed=42)
     print(f"    Chat:      {len(chat_texts)} pairs")
 
     # QA data
@@ -3216,11 +3557,15 @@ def train_chat(model, cfg, device, output_dir,
         tgt_ids = [pad] * (n_ctx - 1) + a_ids + [eos]
         qa_data.append((inp_ids, tgt_ids, p_ids))
 
-    # Build LM datasets
+    # LM dataset: fixed max_len for Wikipedia/shell (consistent batch shapes)
     lm_texts = wiki_texts + shell_texts
     random.shuffle(lm_texts)
     lm_ds = TextLMDataset(lm_texts, max_len=cfg.max_seq_len)
-    chat_ds = TextLMDataset(chat_texts, max_len=cfg.max_seq_len)
+    # Chat dataset: memory-based — user message encoded into memory,
+    # agent response processed via sliding window with cross-attention.
+    # This solves the receptive field problem: the model always "sees"
+    # the user's question through memory, regardless of sliding window size.
+    chat_ds = ChatMemoryDataset(chat_texts)
     print(f"    LM dataset:   {len(lm_ds)} samples")
     print(f"    Chat dataset: {len(chat_ds)} samples")
 
@@ -3268,10 +3613,14 @@ def train_chat(model, cfg, device, output_dir,
             phase_step = step - steps_phase1 - steps_phase2
             return get_lr(phase_step, 100, steps_phase3, lr * 0.33, lr * 0.01)
 
-    # Data loaders (recreated per phase)
-    lm_loader = DataLoader(lm_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    # Data loaders
+    # LM: fixed-length Wikipedia/shell — use standard DataLoader
+    lm_loader = DataLoader(lm_ds, batch_size=batch_size, shuffle=True, drop_last=True,
+                           collate_fn=lm_collate_fn)
     lm_iter = iter(lm_loader)
-    chat_loader = DataLoader(chat_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    # Chat: memory-based — user → memory, agent → sliding window
+    chat_loader = DataLoader(chat_ds, batch_size=batch_size, shuffle=True, drop_last=True,
+                             collate_fn=chat_memory_collate_fn)
     chat_iter = iter(chat_loader)
 
     print(f"\n  {'─' * 56}")
@@ -3375,22 +3724,32 @@ def train_chat(model, cfg, device, output_dir,
                 else:
                     total_loss = total_loss + 0.33 * qa_loss
 
-            # ── Chat loss via causal sliding (phase 3) ──
+            # ── Chat loss via causal sliding + memory-encoded user message (phase 3) ──
             if phase == 3:
                 try:
-                    ch_inp, ch_tgt = next(chat_iter)
+                    ch_user, ch_agent_inp, ch_agent_tgt = next(chat_iter)
                 except StopIteration:
                     chat_iter = iter(chat_loader)
-                    ch_inp, ch_tgt = next(chat_iter)
-                ch_inp, ch_tgt = ch_inp.to(device), ch_tgt.to(device)
+                    ch_user, ch_agent_inp, ch_agent_tgt = next(chat_iter)
+                ch_user = ch_user.to(device)
+                ch_agent_inp = ch_agent_inp.to(device)
+                ch_agent_tgt = ch_agent_tgt.to(device)
 
                 with amp_ctx:
+                    # Encode user message into memory (frozen — no gradient through encoder)
+                    model.eval()
+                    ch_mk, ch_mv, ch_mm = encode_frozen(model, ch_user, device)
+                    model.train()
+
+                    # Process agent response through sliding window with user-memory
                     ch_hidden = sliding_lm_encode(
-                        model, ch_inp, window_size, num_passes, causal=True, stride=stride)
+                        model, ch_agent_inp, window_size, num_passes,
+                        mem_keys=ch_mk, mem_vals=ch_mv, mem_mask=ch_mm,
+                        causal=True, stride=stride)
                     ch_logits = F.linear(ch_hidden, model.embed.weight)
                     ch_loss = F.cross_entropy(
                         ch_logits.reshape(-1, VOCAB_SIZE),
-                        ch_tgt.reshape(-1), ignore_index=pad)
+                        ch_agent_tgt.reshape(-1), ignore_index=pad)
 
                 if accum_i == 0:
                     loss_parts['chat'] = ch_loss.item()

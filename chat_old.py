@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ANT (Addressable Neural Transformer) — Interactive Chat CLI
+ANT — Interactive Chat CLI
 
 Loads a trained checkpoint and provides an interactive terminal interface
 for testing the model with autoregressive byte-level generation.
