@@ -122,6 +122,8 @@ class AddrNet(nn.Module):
         all_logits = []
         for _ in range(self.depth):
             logits = self.out(h)
+            # Clamp logits to prevent Gumbel-softmax overflow
+            logits = logits.clamp(-30.0, 30.0)
             if return_logits:
                 all_logits.append(logits)
             if self.training and temperature > 0:
@@ -224,6 +226,10 @@ class MemoryAttention(nn.Module):
         S = mem_keys.shape[1]
         H, D = self.n_heads, self.head_dim
 
+        # If no valid memory slots, return zeros (skip cross-attention)
+        if mem_mask is not None and not mem_mask.any():
+            return torch.zeros_like(x)
+
         q = self.q(x).view(B, T, H, D).transpose(1, 2)
         k = self.k(mem_keys).view(B, S, H, D).transpose(1, 2)
         v = self.v(mem_values).view(B, S, H, D).transpose(1, 2)
@@ -237,8 +243,16 @@ class MemoryAttention(nn.Module):
             if mem_mask is not None:
                 attn_mask = torch.zeros(B, 1, 1, S, device=x.device, dtype=x.dtype)
                 attn_mask.masked_fill_(~mem_mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+                # Per-sample: if a batch sample has NO valid slots, zero the mask
+                # to avoid softmax(all -inf) → NaN
+                no_valid = ~mem_mask.any(dim=-1)  # (B,)
+                if no_valid.any():
+                    attn_mask[no_valid] = 0.0
             out = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_mask, dropout_p=0.0)
+            # Zero out output for samples with no valid memory
+            if mem_mask is not None and no_valid.any():
+                out[no_valid] = 0.0
         else:
             scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(D)
             if mem_mask is not None:

@@ -100,6 +100,14 @@ class ANTEngine:
         mem_vecs = torch.from_numpy(vecs_np).to(self.device)   # (B, S, d)
         mem_mask = torch.from_numpy(mask_np).to(self.device)    # (B, S)
 
+        # Guard: replace NaN/inf trie vectors with zeros and mask them out
+        bad = mem_vecs.isnan() | mem_vecs.isinf()
+        if bad.any():
+            mem_vecs = mem_vecs.clone()
+            mem_vecs[bad] = 0.0
+            bad_slots = bad.any(dim=-1)  # (B, S)
+            mem_mask = mem_mask & ~bad_slots
+
         return mem_vecs, mem_vecs, mem_mask
 
     def _write_memory(self, hidden: torch.Tensor,
@@ -112,7 +120,16 @@ class ANTEngine:
         """
         # Generate value vectors
         values = self.model.compute_value(hidden)  # (B, d)
+
+        # Guard: skip writing NaN/inf values to trie
         values_np = values.detach().cpu().numpy().astype(np.float32)
+        valid = np.isfinite(values_np).all(axis=-1)  # (B,)
+        if not valid.all():
+            if not valid.any():
+                return  # nothing valid to write
+            # Filter to valid samples only
+            values_np = values_np[valid]
+            hidden = hidden[valid]
 
         # Generate addresses
         addr_tensors = self.model.compute_addresses(hidden.detach(), temperature)
@@ -173,8 +190,8 @@ class ANTEngine:
         # Update tag register (use last token's hidden state)
         self._tag_register = hidden[:, -1, :].detach()
 
-        # Write to trie using pass 2 hidden states
-        if write_to_trie:
+        # Write to trie using pass 2 hidden states (skip if NaN)
+        if write_to_trie and not hidden.isnan().any():
             for t in range(T):
                 self._write_memory(hidden[:, t, :], temperature)
 
@@ -301,6 +318,10 @@ class ANTEngine:
     def _sample(self, logits: torch.Tensor, temperature: float = 0.8,
                 top_k: int = 40, top_p: float = 0.9) -> int:
         """Sample a token from logits with temperature, top-k, and top-p."""
+        # Guard against NaN/inf logits
+        if logits.isnan().any() or logits.isinf().all():
+            return self.cfg.unk_id
+
         if temperature <= 0:
             return logits.argmax(dim=-1).item()
 

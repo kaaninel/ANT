@@ -216,6 +216,10 @@ def phase_b(engine: ANTEngine, cfg: ModelConfig, device: str,
 
     print(f"  Trainable: {count_params(model):,} params (memory subsystem only)")
 
+    # Reset trie — Phase B starts with fresh memory
+    engine.reset_memory()
+    print("  Trie memory reset for clean Phase B start")
+
     # Load text data for memory training
     print("Loading data...")
     wiki = load_wikipedia_sentences(5000)
@@ -291,6 +295,12 @@ def phase_b(engine: ANTEngine, cfg: ModelConfig, device: str,
 
             # Combined loss
             loss = l_lm + 0.1 * l_contrastive + l_depth + 0.1 * l_retrieval
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  WARNING: NaN/inf loss at step {step+1}, skipping")
+                optimizer.zero_grad()
+                step += 1
+                continue
 
             optimizer.zero_grad()
             loss.backward()
@@ -448,6 +458,12 @@ def phase_c(engine: ANTEngine, cfg: ModelConfig, device: str,
             # Combined loss
             loss = lm_loss + 0.5 * qa_loss
 
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  WARNING: NaN/inf loss at step {step+1}, skipping")
+                optimizer.zero_grad()
+                step += 1
+                continue
+
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -496,7 +512,7 @@ def main():
     parser.add_argument("--steps_b", type=int, default=3000)
     parser.add_argument("--steps_c", type=int, default=5000)
     parser.add_argument("--lr_a", type=float, default=3e-4)
-    parser.add_argument("--lr_b", type=float, default=1e-3)
+    parser.add_argument("--lr_b", type=float, default=3e-4)
     parser.add_argument("--lr_c", type=float, default=1e-4)
     parser.add_argument("--batch_a", type=int, default=16)
     parser.add_argument("--batch_b", type=int, default=16)
@@ -571,6 +587,18 @@ def main():
 
     print("\n  Training complete!")
     engine.flush()
+
+    # Quick eval: generate some text to verify model works
+    print(f"\n{'='*60}")
+    print("  Quick generation test")
+    print(f"{'='*60}")
+    prompts = ["The ", "Hello ", "In the "]
+    for p in prompts:
+        prompt_ids = [cfg.bos_id] + [ord(c) for c in p]
+        generated = engine.generate(prompt_ids, max_tokens=60,
+                                    temperature=0.8, top_k=40)
+        text = bytes(generated).decode('utf-8', errors='replace')
+        print(f"  '{p}' → {text[:80]}")
 
 
 if __name__ == "__main__":
