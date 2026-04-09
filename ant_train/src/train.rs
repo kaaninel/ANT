@@ -206,19 +206,22 @@ pub fn phase_a(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
     while step < cfg.steps_a {
         let (batch_flat, b, t) = random_batch(&dataset, cfg.batch_a, &mut rng);
 
-        // Input = batch[..T-1], Target = batch[1..T]
-        let input = Tensor::from_vec(
-            batch_flat[..b * t.saturating_sub(1)].to_vec(),
-            (b, t.saturating_sub(1)), device)?;
-        let target = Tensor::from_vec(
-            batch_flat[b..b * t].to_vec(),  // shift by 1
-            (b, t.saturating_sub(1)), device)?;
+        // Per-row shift: input = row[0..t-1], target = row[1..t]
+        let t1 = t.saturating_sub(1);
+        let mut input_vec: Vec<u32> = Vec::with_capacity(b * t1);
+        let mut target_vec: Vec<u32> = Vec::with_capacity(b * t1);
+        for bi in 0..b {
+            input_vec.extend_from_slice(&batch_flat[bi*t .. bi*t + t1]);
+            target_vec.extend_from_slice(&batch_flat[bi*t + 1 .. bi*t + t]);
+        }
+        let input = Tensor::from_vec(input_vec, (b, t1), device)?;
+        let target = Tensor::from_vec(target_vec, (b, t1), device)?;
 
         // Pure forward — no memory
         let (logits, _halt, _hidden) = engine.model.forward(
             &input, None, None, None, None, None)?;
 
-        let bt = b * (t - 1);
+        let bt = b * t1;
         let logits_2d = logits.reshape((bt, VOCAB_SIZE))?;
         let target_flat = target.flatten_all()?;
         let loss = cross_entropy_with_ignore(&logits_2d, &target_flat, PAD_ID as u32)?;
@@ -295,17 +298,21 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
 
         let (batch_flat, b, t) = random_batch(&dataset, cfg.batch_b, &mut rng);
 
-        let input = Tensor::from_vec(
-            batch_flat[..b * t.saturating_sub(1)].to_vec(),
-            (b, t.saturating_sub(1)), device)?;
-        let target = Tensor::from_vec(
-            batch_flat[b..b * t].to_vec(),
-            (b, t.saturating_sub(1)), device)?;
+        // Per-row shift: input = row[0..t-1], target = row[1..t]
+        let t1 = t.saturating_sub(1);
+        let mut input_vec: Vec<u32> = Vec::with_capacity(b * t1);
+        let mut target_vec: Vec<u32> = Vec::with_capacity(b * t1);
+        for bi in 0..b {
+            input_vec.extend_from_slice(&batch_flat[bi*t .. bi*t + t1]);
+            target_vec.extend_from_slice(&batch_flat[bi*t + 1 .. bi*t + t]);
+        }
+        let input = Tensor::from_vec(input_vec, (b, t1), device)?;
+        let target = Tensor::from_vec(target_vec, (b, t1), device)?;
 
         // Full encode through engine (two-pass with memory)
         let (logits, _halt, hidden) = engine.encode(&input, temperature, true, &mut rng)?;
 
-        let bt = b * (t - 1);
+        let bt = b * t1;
         let logits_2d = logits.reshape((bt, VOCAB_SIZE))?;
         let target_flat = target.flatten_all()?;
         let l_lm = cross_entropy_with_ignore(&logits_2d, &target_flat, PAD_ID as u32)?;
@@ -397,16 +404,20 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
         let (batch_flat, b, t) = random_batch(&dataset, cfg.batch_c, &mut rng);
 
         engine.reset_state(b)?;
-        let input = Tensor::from_vec(
-            batch_flat[..b * t.saturating_sub(1)].to_vec(),
-            (b, t.saturating_sub(1)), device)?;
-        let target = Tensor::from_vec(
-            batch_flat[b..b * t].to_vec(),
-            (b, t.saturating_sub(1)), device)?;
+        // Per-row shift: input = row[0..t-1], target = row[1..t]
+        let t1 = t.saturating_sub(1);
+        let mut input_vec: Vec<u32> = Vec::with_capacity(b * t1);
+        let mut target_vec: Vec<u32> = Vec::with_capacity(b * t1);
+        for bi in 0..b {
+            input_vec.extend_from_slice(&batch_flat[bi*t .. bi*t + t1]);
+            target_vec.extend_from_slice(&batch_flat[bi*t + 1 .. bi*t + t]);
+        }
+        let input = Tensor::from_vec(input_vec, (b, t1), device)?;
+        let target = Tensor::from_vec(target_vec, (b, t1), device)?;
 
         let (logits, _halt, _hidden) = engine.encode(&input, 1.0, true, &mut rng)?;
 
-        let bt = b * (t - 1);
+        let bt = b * t1;
         let logits_2d = logits.reshape((bt, VOCAB_SIZE))?;
         let target_flat = target.flatten_all()?;
         let loss = cross_entropy_with_ignore(&logits_2d, &target_flat, PAD_ID as u32)?;
