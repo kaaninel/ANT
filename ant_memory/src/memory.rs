@@ -132,8 +132,8 @@ impl MemorySystem {
 
     /// Read memory for multiple address paths.
     ///
-    /// Collects full ancestor path from each address, deduplicates root,
-    /// pads/truncates to max_vectors.
+    /// Collects full ancestor path from each address, deduplicates by node index
+    /// (not just root), pads/truncates to max_vectors.
     ///
     /// Args:
     ///     addresses: list of N numpy arrays, each shape (depth,) uint8
@@ -153,17 +153,16 @@ impl MemorySystem {
         let d = self.d_model;
 
         let mut all_vectors: Vec<&[f32]> = Vec::new();
-        let mut root_added = false;
+        let mut seen_nodes: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         for addr in &addresses {
             let a = addr.as_slice()?;
             let path = trie.read_path(a);
 
-            if !root_added && !path.is_empty() {
-                all_vectors.extend_from_slice(&path);
-                root_added = true;
-            } else if path.len() > 1 {
-                all_vectors.extend_from_slice(&path[1..]);
+            for (node_idx, value) in path {
+                if seen_nodes.insert(node_idx) {
+                    all_vectors.push(value);
+                }
             }
         }
 
@@ -208,17 +207,16 @@ impl MemorySystem {
 
         for (b, addrs) in batch_addresses.iter().enumerate() {
             let mut all_vectors: Vec<&[f32]> = Vec::new();
-            let mut root_added = false;
+            let mut seen_nodes: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
             for addr in addrs {
                 let a = addr.as_slice()?;
                 let path = trie.read_path(a);
 
-                if !root_added && !path.is_empty() {
-                    all_vectors.extend_from_slice(&path);
-                    root_added = true;
-                } else if path.len() > 1 {
-                    all_vectors.extend_from_slice(&path[1..]);
+                for (node_idx, value) in path {
+                    if seen_nodes.insert(node_idx) {
+                        all_vectors.push(value);
+                    }
                 }
             }
 

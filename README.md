@@ -26,7 +26,7 @@ knowledge without growing its parameters.
 
 ## How It Works
 
-The model processes raw bytes through a sliding window transformer. At every
+The model processes raw bytes through a causal transformer. At every
 token, 3 learned **AddrNet** co-processors generate hierarchical addresses
 into a 256-ary trie. The trie is read (up to 25 ancestor vectors via
 cross-attention) and written (EMA-blended value vectors at every level).
@@ -98,7 +98,7 @@ Knowledge accumulates with every byte seen.
 
 ### AddrNet Co-processors
 
-3 separate MLP networks (10.5K params each) that generate 8-level
+3 separate MLP networks (10,784 params each) that generate 8-level
 hierarchical addresses into the 256-ary trie:
 
 ```
@@ -124,20 +124,20 @@ hierarchical addresses into the 256-ary trie:
 
 Storage: single flat binary file. ~500 bytes/node. 3ms load for 9K nodes.
 
-### Sliding Window
-
-Causal sliding window with multi-pass refinement:
+### Context Strategy
 
 ```
-  W=8, stride=1, passes=4 → ~16 bytes effective local context
-  Combined with trie cross-attention → unlimited global context
+  Local context:  up to 192 bytes via causal self-attention
+  Global context: unlimited via trie memory cross-attention
+  Training:       two-pass forward (pass 1 for addresses, pass 2 with memory)
+  Inference:      per-token sequential (read → process → write → output)
 ```
 
 ## Training Curriculum
 
 1. **Phase A — Base LM**: Language modeling on wiki + shell (no memory)
 2. **Phase B — Memory Training**: Freeze base, train AddrNet + V_proj + tags
-   with contrastive address loss and depth penalty
+   with LM loss through memory, contrastive address loss, and depth penalty
 3. **Phase C — End-to-End**: Unfreeze base (keep AddrNet/V_proj frozen),
    every pass reads and writes the trie
 

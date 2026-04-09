@@ -181,48 +181,36 @@ Persistent context register tracking current speaker/mode.
   (e.g., speaker change, topic change) and WHAT to store.
 ```
 
-## Sliding Window
-
-Causal sliding window with multi-pass refinement for unlimited context.
-
-```
-  Window size: 8 bytes, stride: 1, passes: 4
-
-  Pass 1:  ────[████████]────────────────  4 bytes left context
-  Pass 2:  ────[████████]────────────────  8 bytes left context
-  Pass 3:  ────[████████]────────────────  12 bytes left context
-  Pass 4:  ────[████████]────────────────  16 bytes left context
-
-  Each pass:
-    1. Pad edges with PAD embedding
-    2. Unfold into overlapping windows
-    3. Process each window through all 4 transformer layers
-       (self-attn + tag-attn + mem-attn + FFN)
-    4. Extract center position → update hidden state
-
-  Combined with memory cross-attention:
-    Local context:  ~16 bytes (sliding window)
-    Global context: unlimited (trie memory, no distance limit)
-```
-
 ## Data Flow — Complete Cycle
 
 ```
-  ┌─ ENCODE (every token processed) ──────────────────────────┐
-  │                                                           │
-  │  input byte → embed → sliding window → hidden state       │
-  │                                     ↑                     │
-  │                        trie READ ───┘                     │
-  │                                                           │
-  │  hidden → AddrNets → 3 addresses ─┐                       │
-  │  hidden → V_proj → value ──────────┼──► trie WRITE        │
-  │                                                           │
-  │  hidden → LM head → logits (next byte prediction)        │
-  │  hidden → halt head → continue/halt decision             │
-  └───────────────────────────────────────────────────────────┘
+  ┌─ TRAINING (engine.encode — two-pass parallel) ──────────┐
+  │                                                          │
+  │  Pass 1: tokens → embed → transformer (no memory) → H1  │
+  │          H1.mean() → AddrNets → 3 addresses              │
+  │                                   → trie READ            │
+  │                                                          │
+  │  Pass 2: tokens → embed → transformer (WITH memory) → H2│
+  │          H2 → AddrNets → 3 addresses ─┐                  │
+  │          H2 → V_proj → value ──────────┼──► trie WRITE   │
+  │          H2 → LM head → logits (loss)                   │
+  │                                                          │
+  │  Two passes ensure read addresses come from processed    │
+  │  hidden states (same distribution as write addresses).   │
+  └──────────────────────────────────────────────────────────┘
 
-  Every single token: READ from trie, process, WRITE to trie.
-  The trie grows with every token seen. Knowledge accumulates.
+  ┌─ INFERENCE (engine.generate — per-token sequential) ─────┐
+  │                                                          │
+  │  For each token:                                         │
+  │    prev_hidden → AddrNets → 3 addresses → trie READ     │
+  │    token → embed → transformer (with memory) → hidden    │
+  │    hidden → AddrNets → 3 addresses ─┐                    │
+  │    hidden → V_proj → value ──────────┼──► trie WRITE     │
+  │    hidden → LM head → next byte logit                   │
+  │    hidden → halt head → continue/halt (1-4 cycles)      │
+  │                                                          │
+  │  True per-token cycle. Knowledge accumulates in trie.    │
+  └──────────────────────────────────────────────────────────┘
 ```
 
 ## Special Tokens
@@ -250,22 +238,22 @@ Causal sliding window with multi-pass refinement for unlimited context.
   Byte Embedding (256 × 128)      32,768     3.5%
   4 × TransformerBlock:
     Self-Attention (Q,K,V,O)      65,536
-    Tag head + gate + RMSNorm     16,641
+    Tag head + gate + norm_tag    16,769
     Memory Cross-Attn (Q,K,V,O)   65,540
     FFN (up + down)               65,536
     RMSNorm × 3                      384
-    Subtotal per layer:          213,637
-    × 4 layers =                             854,548    91.2%
+    Subtotal per layer:          213,765
+    × 4 layers =                             855,060    91.2%
   3 × AddrNet:
     proj_in + bin_embed + mlp + out
-    Subtotal per net: ~10,528
-    × 3 nets =                                31,584     3.4%
+    Subtotal per net: 10,784
+    × 3 nets =                                32,352     3.5%
   V_proj (128 → 128)              16,512     1.8%
   Halt Head (128 → 2)                258     0.0%
   Final RMSNorm                      128     0.0%
   LM Head                    (tied with embed)
   ─────────────────────────────   ────────   ─────
-  TOTAL                          ~937,078   100.0%
+  TOTAL                           937,078   100.0%
 ```
 
 ## Training Curriculum
@@ -273,7 +261,7 @@ Causal sliding window with multi-pass refinement for unlimited context.
 ### Phase A — Base Language Model (no memory)
 
 ```
-  Wiki + Shell → sliding window encode → causal LM loss
+  Wiki + Shell → causal LM → LM loss
   Purpose: learn language, embeddings, attention patterns
   Memory: OFF (not used at all)
 ```
@@ -283,11 +271,13 @@ Causal sliding window with multi-pass refinement for unlimited context.
 ```
   Freeze: all base model weights
   Train:  AddrNets, V_proj, tag system only
+  Data:   same wiki + shell as Phase A, processed via two-pass forward
   Losses:
+    - LM loss (through memory cross-attention path, trains mem_attn/tags)
     - Contrastive address loss (same passage → similar addresses)
     - Quadratic depth cost (incentivize shallow addresses for common concepts)
     - Retrieval accuracy (write then read back → should match)
-  Purpose: learn stable address space and value projection
+  Purpose: learn stable address space, value projection, AND memory usage
 ```
 
 ### Phase C — End-to-End (memory always active)
@@ -319,7 +309,7 @@ Causal sliding window with multi-pass refinement for unlimited context.
     it outputs NOOP. This allows asymmetric read/write speeds.
 
   Context window: unlimited.
-    Local:  sliding window (~16 bytes)
+    Local:  causal self-attention (up to 192 bytes)
     Global: entire trie (every fact ever stored)
 ```
 

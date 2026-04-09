@@ -72,7 +72,7 @@ This cycle happens for EVERY token. Memory is not a separate phase or mode.
 ### AddrNet
 
 ```
-  3 separate MLP co-processors, ~10.5K params each
+  3 separate MLP co-processors, 10,784 params each
   proj_in(128→16) + 8× [out(16→256) → Gumbel-softmax → embed(256,16) → SiLU(MLP)]
   Training: Gumbel-softmax (hard=True, differentiable)
   Inference: argmax (deterministic)
@@ -143,7 +143,7 @@ GRU-gated persistent register.
 
 ```
 Phase A: Base LM (no memory) — learn language patterns
-Phase B: Freeze base, train AddrNet/V_proj/tags — learn stable address space
+Phase B: Freeze base, train AddrNet/V_proj/tags — LM loss through memory + address/retrieval losses
 Phase C: Unfreeze base (keep AddrNet/V_proj frozen) — learn to use memory
 ```
 

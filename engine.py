@@ -124,11 +124,15 @@ class ANTEngine:
     def encode(self, token_ids: torch.Tensor,
                temperature: float = 1.0,
                write_to_trie: bool = True) -> dict:
-        """Training-mode encoding: parallel read → forward → parallel write.
+        """Training-mode encoding: two-pass forward for correct address distribution.
 
-        This is a parallel approximation of the per-token cycle for efficiency.
-        Within a sequence, self-attention provides token-to-token flow.
-        Between training steps, the trie accumulates knowledge.
+        Pass 1: Forward WITHOUT memory to get processed hidden states.
+                Use those hidden states to generate trie read addresses.
+        Pass 2: Forward WITH memory (trie-retrieved vectors via cross-attention).
+                Use pass 2 hidden states for trie writes and loss computation.
+
+        This ensures read and write addresses come from the same distribution
+        (processed hidden states), matching inference behavior.
 
         Args:
             token_ids:     (B, T) byte token IDs
@@ -138,7 +142,7 @@ class ANTEngine:
         Returns dict with:
             logits:      (B, T, V) next-byte prediction logits
             halt_logits: (B, T, 2) continue/halt logits
-            hidden:      (B, T, d) hidden states
+            hidden:      (B, T, d) hidden states (from pass 2)
             mem_mask:    (B, S) memory mask (for loss masking if needed)
         """
         B, T = token_ids.shape
@@ -146,15 +150,17 @@ class ANTEngine:
         if self._tag_register is None or self._tag_register.shape[0] != B:
             self.reset_state(B)
 
-        # Step 1: Read from trie using initial hidden state (embedding)
-        # Use the mean embedding as the address query
+        # Pass 1: Forward without memory to get processed hidden states
         with torch.no_grad():
-            init_embed = self.model.embed(token_ids).mean(dim=1)  # (B, d)
+            _, _, hidden_p1 = self.model(
+                token_ids, tag_register=self._tag_register,
+                return_hidden=True)
+            h_mean = hidden_p1.mean(dim=1)  # (B, d)
 
-        mem_keys, mem_values, mem_mask = self._read_memory(
-            init_embed, temperature)
+        # Use pass 1 hidden for trie read addresses
+        mem_keys, mem_values, mem_mask = self._read_memory(h_mean, temperature)
 
-        # Step 2: Forward pass with memory cross-attention
+        # Pass 2: Forward with memory cross-attention
         logits, halt_logits, hidden = self.model(
             token_ids,
             mem_keys=mem_keys,
@@ -164,12 +170,11 @@ class ANTEngine:
             return_hidden=True,
         )
 
-        # Step 3: Update tag register (use last token's hidden state)
+        # Update tag register (use last token's hidden state)
         self._tag_register = hidden[:, -1, :].detach()
 
-        # Step 4: Write to trie (using per-position hidden states)
+        # Write to trie using pass 2 hidden states
         if write_to_trie:
-            # Write every position's hidden state to trie
             for t in range(T):
                 self._write_memory(hidden[:, t, :], temperature)
 
@@ -211,9 +216,12 @@ class ANTEngine:
         kv_cache = self.model.make_cache(B, max_seq=len(prompt_ids) + max_tokens,
                                          device=device)
 
-        # Read memory for prompt
-        init_embed = self.model.embed(prompt).mean(dim=1)
-        mem_keys, mem_values, mem_mask = self._read_memory(init_embed)
+        # Read memory for prompt using processed hidden (two-pass)
+        with torch.no_grad():
+            _, _, h_prefill = self.model(
+                prompt, tag_register=self._tag_register, return_hidden=True)
+            h_mean = h_prefill.mean(dim=1)
+        mem_keys, mem_values, mem_mask = self._read_memory(h_mean)
 
         # Prefill forward
         logits, halt_logits, hidden, kv_cache = self.model(
@@ -263,10 +271,12 @@ class ANTEngine:
             # Update tag register — always (B, d)
             self._tag_register = hidden[:, -1, :]
 
-            # Handle halt head (multi-cycle fetch)
-            halt_probs = F.softmax(halt_logits[:, -1, :], dim=-1)
-            if halt_probs[0, 1] > 0.5:  # Halt probability > 50%
-                # Model wants more memory cycles — re-read with updated state
+            # Handle halt head (1-4 memory fetch cycles)
+            for _cycle in range(3):  # up to 3 extra cycles (4 total with first)
+                halt_probs = F.softmax(halt_logits[:, -1, :], dim=-1)
+                if halt_probs[0, 1] > 0.5:
+                    break
+                # Model wants more memory — re-read with updated state
                 mem_keys, mem_values, mem_mask = self._read_memory(hidden[:, -1, :])
                 logits, halt_logits, hidden, kv_cache = self.model(
                     tok,

@@ -136,13 +136,13 @@ impl HierarchicalTrie {
 
     /// Read the full ancestor path for an address.
     ///
-    /// Returns vectors from root to deepest matching node.
+    /// Returns (node_index, value_slice) pairs from root to deepest matching node.
     /// If exact address doesn't exist, returns path to deepest existing prefix.
-    pub fn read_path(&self, address: &[u8]) -> Vec<&[f32]> {
-        let mut vectors = Vec::with_capacity(self.depth_cap + 1);
+    pub fn read_path(&self, address: &[u8]) -> Vec<(u32, &[f32])> {
+        let mut results = Vec::with_capacity(self.depth_cap + 1);
 
         if let Some(ref v) = self.nodes[0].value {
-            vectors.push(v.as_slice());
+            results.push((0u32, v.as_slice()));
         }
 
         let mut current = 0u32;
@@ -150,14 +150,14 @@ impl HierarchicalTrie {
             if let Some(&child_idx) = self.nodes[current as usize].children.get(&bin) {
                 current = child_idx;
                 if let Some(ref v) = self.nodes[current as usize].value {
-                    vectors.push(v.as_slice());
+                    results.push((current, v.as_slice()));
                 }
             } else {
                 break;
             }
         }
 
-        vectors
+        results
     }
 
     /// Total number of nodes in the trie.
@@ -174,20 +174,20 @@ impl HierarchicalTrie {
 
     /// Serialize trie to bytes.
     ///
-    /// Format: header(12B) | values(N×D×4B) | write_counts(N×4B) | adjacency
-    /// Header: n_nodes(u32), d_model(u32), n_records(u32)
+    /// Format: header(20B) | values(N×D×4B) | write_counts(N×4B) | adjacency
+    /// Header: n_nodes(u32), d_model(u32), depth_cap(u32), n_records(u64)
     /// Adjacency per node: n_children(u16) + n_children × (bin_id(u8) + child_idx(u32))
     pub fn serialize(&self) -> Vec<u8> {
         let n = self.nodes.len();
         let d = self.d_model;
-        // Estimate size: header + values + write_counts + adjacency
-        let est = 12 + n * d * 4 + n * 4 + n * 10;
+        let est = 20 + n * d * 4 + n * 4 + n * 10;
         let mut buf = Vec::with_capacity(est);
 
-        // Header
+        // Header (20 bytes)
         buf.extend_from_slice(&(n as u32).to_le_bytes());
         buf.extend_from_slice(&(d as u32).to_le_bytes());
-        buf.extend_from_slice(&(self.n_records as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.depth_cap as u32).to_le_bytes());
+        buf.extend_from_slice(&self.n_records.to_le_bytes()); // u64
 
         // Values: contiguous f32 block
         for node in &self.nodes {
@@ -225,19 +225,20 @@ impl HierarchicalTrie {
 
     /// Deserialize trie from bytes.
     pub fn deserialize(data: &[u8]) -> Option<Self> {
-        if data.len() < 12 {
+        if data.len() < 20 {
             return None;
         }
 
         let n = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
         let d = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
-        let n_records = u32::from_le_bytes(data[8..12].try_into().ok()?) as u64;
+        let depth_cap = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
+        let n_records = u64::from_le_bytes(data[12..20].try_into().ok()?);
 
         if n == 0 || d == 0 {
             return None;
         }
 
-        let values_start = 12;
+        let values_start = 20;
         let values_end = values_start + n * d * 4;
         let wc_end = values_end + n * 4;
 
@@ -285,7 +286,7 @@ impl HierarchicalTrie {
 
         Some(Self {
             d_model: d,
-            depth_cap: 8,
+            depth_cap,
             nodes,
             n_records,
         })

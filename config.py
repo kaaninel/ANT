@@ -49,5 +49,6 @@ class MemoryConfig:
     ema_alpha_min: float = 0.001
     depth_cap: int = 8
     d_model: int = 128
+    n_bins: int = 256
     flush_interval: int = 1000
 

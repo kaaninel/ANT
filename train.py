@@ -161,14 +161,13 @@ def contrastive_address_loss(logits_a, logits_b):
     a list of `depth` tensors of shape (B, n_bins).
     Uses KL divergence on softmax distributions — fully differentiable.
     """
-    loss = torch.tensor(0.0, device=logits_a[0][0].device, requires_grad=True)
+    losses = []
     for net_logits_a, net_logits_b in zip(logits_a, logits_b):
         for la, lb in zip(net_logits_a, net_logits_b):
             pa = F.log_softmax(la, dim=-1)
             pb = F.softmax(lb, dim=-1)
-            loss = loss + F.kl_div(pa, pb, reduction='batchmean')
-    n = len(logits_a) * len(logits_a[0])
-    return loss / max(n, 1)
+            losses.append(F.kl_div(pa, pb, reduction='batchmean'))
+    return sum(losses) / max(len(losses), 1)
 
 
 def depth_cost(logits_list, penalty_scale: float = 0.01):
@@ -177,15 +176,14 @@ def depth_cost(logits_list, penalty_scale: float = 0.01):
     logits_list: list of N AddrNets, each containing `depth` tensors (B, n_bins).
     Penalizes high entropy at deeper levels (encourages early commitment).
     """
-    loss = torch.tensor(0.0, device=logits_list[0][0].device, requires_grad=True)
+    losses = []
     for net_logits in logits_list:
         for d, logits in enumerate(net_logits):
             probs = F.softmax(logits, dim=-1)
             entropy = -(probs * (probs + 1e-10).log()).sum(dim=-1).mean()
             depth_weight = float((d + 1) ** 2)
-            loss = loss + entropy * depth_weight
-    n = len(logits_list) * len(logits_list[0])
-    return loss * penalty_scale / max(n, 1)
+            losses.append(entropy * depth_weight)
+    return sum(losses) * penalty_scale / max(len(losses), 1)
 
 
 def phase_b(engine: ANTEngine, cfg: ModelConfig, device: str,
@@ -193,10 +191,14 @@ def phase_b(engine: ANTEngine, cfg: ModelConfig, device: str,
             start_step: int = 0, ckpt_dir: str = "checkpoints/train"):
     """Freeze base, train memory subsystem (AddrNets, V_proj, tags, mem_attn).
 
+    Uses full forward pass through engine.encode() (two-pass) so all memory
+    components participate in the computation graph via LM loss.
+
     Losses (per ARCHITECTURE.md):
-      1. Contrastive address loss: same passage → similar addresses
-      2. Quadratic depth cost: incentivize shallow addresses for common concepts
-      3. Retrieval accuracy: write then read back → should match
+      1. LM loss — through memory cross-attention (trains mem_attn, tags)
+      2. Contrastive address loss — same passage → similar address distributions
+      3. Quadratic depth cost — incentivize shallow addresses
+      4. Retrieval accuracy — write then read back → value should match
     """
     print(f"\n{'='*60}")
     print(f"  Phase B — Memory Training (frozen base)")
@@ -222,7 +224,7 @@ def phase_b(engine: ANTEngine, cfg: ModelConfig, device: str,
     print(f"  {len(all_texts)} texts loaded")
 
     dataset = TextLMDataset(all_texts, max_len=cfg.max_seq_len)
-    loader = DataLoader(dataset, batch_size=1, shuffle=True,
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         collate_fn=lm_collate_fn, drop_last=True)
 
     optimizer = torch.optim.AdamW(
@@ -231,6 +233,7 @@ def phase_b(engine: ANTEngine, cfg: ModelConfig, device: str,
 
     model.train()
     step = start_step
+    running_lm = 0.0
     running_contrastive = 0.0
     running_depth = 0.0
     running_retrieval = 0.0
@@ -246,43 +249,48 @@ def phase_b(engine: ANTEngine, cfg: ModelConfig, device: str,
             inp, tgt = inp.to(device), tgt.to(device)
             temperature = max(0.5, 1.0 - step / steps)
 
-            # --- Get hidden from frozen base (no grad on base, but graph flows to AddrNets) ---
-            embed = model.embed(inp)
-            hidden_a = model.norm(embed).detach()  # detach base output
-            h_mean = hidden_a.mean(dim=1)  # (B, d)
+            # --- Full forward through engine (two-pass with memory) ---
+            engine.reset_state(inp.shape[0])
+            result = engine.encode(inp, temperature=temperature,
+                                   write_to_trie=True)
 
-            # --- Loss 1: Contrastive address loss ---
-            # Encode same passage twice, logit distributions should be similar
-            addr_a, logits_a = model.compute_addresses(h_mean, temperature,
-                                                       return_logits=True)
-            addr_b, logits_b = model.compute_addresses(h_mean, temperature,
-                                                       return_logits=True)
+            # LM loss (trains mem_attn, tags, halt through memory path)
+            l_lm = F.cross_entropy(
+                result["logits"].reshape(-1, cfg.vocab_size),
+                tgt.reshape(-1),
+                ignore_index=PAD_ID,
+            )
+
+            # --- Address quality losses (on post-transformer hidden) ---
+            h_mean = result["hidden"].mean(dim=1).detach()
+
+            # Contrastive: two address passes should produce similar distributions
+            _, logits_a = model.compute_addresses(h_mean, temperature,
+                                                  return_logits=True)
+            _, logits_b = model.compute_addresses(h_mean, temperature,
+                                                  return_logits=True)
             l_contrastive = contrastive_address_loss(logits_a, logits_b)
 
-            # --- Loss 2: Quadratic depth cost ---
+            # Depth cost: encourage shallow, sharp addresses
             l_depth = depth_cost(logits_a)
 
-            # --- Loss 3: Retrieval accuracy ---
-            # Write a value, read it back, should match
-            value = model.compute_value(h_mean)  # (B, d) — V_proj is trainable
-
-            # Write to trie (detached — trie ops are not differentiable)
+            # Retrieval: write value, read back, should match
+            value = model.compute_value(h_mean)
             val_np = value.detach().cpu().numpy().astype(np.float32)
+            addr_a, _ = model.compute_addresses(h_mean, temperature,
+                                                return_logits=True)
             batch_addrs = engine._addrs_to_numpy(
                 [a.detach() for a in addr_a])
             engine.memory.write_batch(batch_addrs, val_np)
 
-            # Read back from trie (returns constant tensor, no grad)
             mem_vecs, _, mem_mask = engine._read_memory(
                 h_mean.detach(), temperature)
-
-            # Retrieval loss: value (has grad through V_proj) vs readback (target)
             valid_count = mem_mask.sum(dim=-1, keepdim=True).clamp(min=1)
             read_avg = (mem_vecs * mem_mask.unsqueeze(-1).float()).sum(dim=1) / valid_count.float()
             l_retrieval = F.mse_loss(value, read_avg.detach())
 
             # Combined loss
-            loss = l_contrastive + l_depth + l_retrieval
+            loss = l_lm + 0.1 * l_contrastive + l_depth + 0.1 * l_retrieval
 
             optimizer.zero_grad()
             loss.backward()
@@ -291,20 +299,24 @@ def phase_b(engine: ANTEngine, cfg: ModelConfig, device: str,
             optimizer.step()
 
             step += 1
+            running_lm += l_lm.item()
             running_contrastive += l_contrastive.item()
             running_depth += l_depth.item()
             running_retrieval += l_retrieval.item()
 
             if step % log_interval == 0:
+                avg_lm = running_lm / log_interval
                 avg_c = running_contrastive / log_interval
                 avg_d = running_depth / log_interval
                 avg_r = running_retrieval / log_interval
                 elapsed = time.time() - t0
                 it_s = log_interval / elapsed
                 mem = engine.memory_stats()
-                print(f"  B step {step}/{steps} | contr {avg_c:.4f} "
-                      f"depth {avg_d:.4f} retr {avg_r:.4f} | "
+                print(f"  B step {step}/{steps} | lm {avg_lm:.4f} "
+                      f"contr {avg_c:.4f} depth {avg_d:.4f} "
+                      f"retr {avg_r:.4f} | "
                       f"{it_s:.1f} it/s | trie: {mem['total_nodes']} nodes")
+                running_lm = 0.0
                 running_contrastive = 0.0
                 running_depth = 0.0
                 running_retrieval = 0.0
