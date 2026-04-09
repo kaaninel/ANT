@@ -285,6 +285,7 @@ class ANTEngine:
                     return_hidden=True,
                     kv_cache=kv_cache, cache_position=cache_pos - 1,
                 )
+                self._tag_register = hidden[:, -1, :]
 
             # Sample next token
             next_logits = logits[:, -1, :]

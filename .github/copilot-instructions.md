@@ -155,7 +155,7 @@ say yet". Halt head decides 1–4 memory fetch cycles per output token.
 ## Gotchas
 
 - `model.forward()` returns `(logits, halt_logits, ...)` — unpack or index `[0]`
-- Memory cross-attention uses `memory_keys` and `memory_values` kwargs
+- Memory cross-attention uses `mem_keys` and `mem_values` kwargs
 - LM head is weight-tied: `F.linear(hidden, model.embed.weight)`
 - `data_cache/` stores downloaded data — auto-regenerated if missing
 - `checkpoints/` can grow large across experiments

@@ -86,7 +86,7 @@ Each of 4 layers follows: Self-Attn → Tag-Attn → Mem-Attn → FFN
 ## AddrNet — Address Generation
 
 3 separate MLP co-processors, each generating an 8-level hierarchical
-address into the trie. ~10.5K params each, 31.5K total.
+address into the trie. 10,784 params each, 32,352 total.
 
 ```
   hidden_state (128-dim)
@@ -148,7 +148,7 @@ The trie stores EMA-blended value vectors at every node (root to leaf).
 
   Storage:
     Single flat binary file: header + values + write_counts + adjacency
-    Header: n_nodes(u32), d_model(u32), n_records(u32)
+    Header (20B): n_nodes(u32), d_model(u32), depth_cap(u32), n_records(u64)
     Values: contiguous float32 block (mmap-friendly)
     ~500 bytes per node (128 × 4 = 512 bytes value + metadata)
 ```
@@ -184,7 +184,7 @@ Persistent context register tracking current speaker/mode.
 ## Data Flow — Complete Cycle
 
 ```
-  ┌─ TRAINING (engine.encode — two-pass parallel) ──────────┐
+  ┌─ TRAINING (engine.encode — two-pass forward) ───────────┐
   │                                                          │
   │  Pass 1: tokens → embed → transformer (no memory) → H1  │
   │          H1.mean() → AddrNets → 3 addresses              │
@@ -269,8 +269,8 @@ Persistent context register tracking current speaker/mode.
 ### Phase B — Memory Training (frozen base)
 
 ```
-  Freeze: all base model weights
-  Train:  AddrNets, V_proj, tag system only
+  Freeze: base model (embedding, self-attn, FFN, norms)
+  Train:  AddrNets, V_proj, tags, mem_attn, halt_head (378K params)
   Data:   same wiki + shell as Phase A, processed via two-pass forward
   Losses:
     - LM loss (through memory cross-attention path, trains mem_attn/tags)

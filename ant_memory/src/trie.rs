@@ -307,7 +307,9 @@ mod tests {
         let path = trie.read_path(&addr);
         assert_eq!(path.len(), 4); // root + 3 levels
         // Leaf should be exact value on first write
-        assert_eq!(path[3], &value[..]);
+        assert_eq!(path[3].1, &value[..]);
+        // Node indices should be sequential (root=0, then 1, 2, 3)
+        assert_eq!(path[0].0, 0);
     }
 
     #[test]
@@ -338,7 +340,7 @@ mod tests {
         let path1 = trie.read_path(&[1, 2, 3]);
         let path2 = trie2.read_path(&[1, 2, 3]);
         assert_eq!(path1.len(), path2.len());
-        assert_eq!(path1[3], path2[3]);
+        assert_eq!(path1[3].1, path2[3].1);
     }
 
     #[test]
@@ -358,11 +360,11 @@ mod tests {
         let addr = vec![1u8];
 
         trie.write(&addr, &[10.0, 0.0], 0.5, 0.001);
-        let v1 = trie.read_path(&addr)[1].to_vec();
+        let v1 = trie.read_path(&addr)[1].1.to_vec();
         assert_eq!(v1, vec![10.0, 0.0]); // first write = exact copy
 
         trie.write(&addr, &[0.0, 10.0], 0.5, 0.001);
-        let v2 = trie.read_path(&addr)[1].to_vec();
+        let v2 = trie.read_path(&addr)[1].1.to_vec();
         // EMA: alpha ~= 0.5 / (1 + 0.01*2) ≈ 0.49
         // new = (1-0.49)*10 + 0.49*0 ≈ 5.1, (1-0.49)*0 + 0.49*10 ≈ 4.9
         assert!(v2[0] > 4.0 && v2[0] < 6.0);

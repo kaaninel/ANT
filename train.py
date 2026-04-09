@@ -399,6 +399,9 @@ def phase_c(engine: ANTEngine, cfg: ModelConfig, device: str,
 
             inp, tgt = inp.to(device), tgt.to(device)
 
+            # Reset tag state per step (each batch is independent)
+            engine.reset_state(batch_size)
+
             # LM loss
             result = engine.encode(inp)
             lm_loss = F.cross_entropy(
