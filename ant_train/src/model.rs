@@ -8,7 +8,7 @@
 /// LM head is weight-tied with byte embedding.
 
 use candle_core::{DType, Device, Result, Tensor, D};
-use candle_nn::{embedding, linear_no_bias, ops, Embedding, Linear, Module, VarBuilder};
+use candle_nn::{embedding, linear_no_bias, ops, Embedding, Linear, Module, VarBuilder, VarMap};
 use rand::Rng;
 
 use crate::config::*;
@@ -351,16 +351,22 @@ pub struct TransformerBlock {
 
 impl TransformerBlock {
     pub fn new(vb: VarBuilder) -> Result<Self> {
+        Self::new_split(vb.clone(), vb)
+    }
+
+    /// Split constructor: base components (self-attn, FFN) from base_vb,
+    /// memory components (mem-attn, tags) from mem_vb.
+    pub fn new_split(base_vb: VarBuilder, mem_vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            norm1: RMSNorm::new(D_MODEL, vb.pp("norm1"))?,
-            attn: Attention::new(D_MODEL, N_HEADS, HEAD_DIM, vb.pp("attn"))?,
-            norm_tag: RMSNorm::new(D_MODEL, vb.pp("norm_tag"))?,
-            tag_head: linear_no_bias(D_MODEL, D_MODEL, vb.pp("tag_head"))?,
-            tag_gate: linear_no_bias(D_MODEL, 1, vb.pp("tag_gate"))?,
-            norm_mem: RMSNorm::new(D_MODEL, vb.pp("norm_mem"))?,
-            mem_attn: MemoryAttention::new(D_MODEL, N_HEADS, HEAD_DIM, vb.pp("mem_attn"))?,
-            norm2: RMSNorm::new(D_MODEL, vb.pp("norm2"))?,
-            ffn: SiLUFFN::new(D_MODEL, FFN_DIM, vb.pp("ffn"))?,
+            norm1: RMSNorm::new(D_MODEL, base_vb.pp("norm1"))?,
+            attn: Attention::new(D_MODEL, N_HEADS, HEAD_DIM, base_vb.pp("attn"))?,
+            norm_tag: RMSNorm::new(D_MODEL, mem_vb.pp("norm_tag"))?,
+            tag_head: linear_no_bias(D_MODEL, D_MODEL, mem_vb.pp("tag_head"))?,
+            tag_gate: linear_no_bias(D_MODEL, 1, mem_vb.pp("tag_gate"))?,
+            norm_mem: RMSNorm::new(D_MODEL, mem_vb.pp("norm_mem"))?,
+            mem_attn: MemoryAttention::new(D_MODEL, N_HEADS, HEAD_DIM, mem_vb.pp("mem_attn"))?,
+            norm2: RMSNorm::new(D_MODEL, base_vb.pp("norm2"))?,
+            ffn: SiLUFFN::new(D_MODEL, FFN_DIM, base_vb.pp("ffn"))?,
         })
     }
 
@@ -465,6 +471,43 @@ impl ANT {
 
         let v_proj = candle_nn::linear(D_MODEL, D_MODEL, vb.pp("v_proj"))?;
         let rope = RoPE::new(HEAD_DIM, MAX_SEQ_LEN, ROPE_THETA, device)?;
+
+        Ok(Self { embed, layers, norm, halt_head, addr_nets, v_proj, rope, device: device.clone() })
+    }
+
+    /// Construct with 3 separate VarMaps for parameter group isolation:
+    ///   base_vm  — embed, self-attn, FFN, final norm  (frozen in Phase B)
+    ///   addr_vm  — AddrNets, v_proj                   (frozen in Phase C)
+    ///   mem_vm   — mem_attn, tag system, halt_head    (trainable in B and C)
+    pub fn new_split(
+        base_vm: &VarMap, addr_vm: &VarMap, mem_vm: &VarMap, device: &Device,
+    ) -> Result<Self> {
+        let base_vb = VarBuilder::from_varmap(base_vm, DType::F32, device);
+        let addr_vb = VarBuilder::from_varmap(addr_vm, DType::F32, device);
+        let mem_vb  = VarBuilder::from_varmap(mem_vm,  DType::F32, device);
+
+        let embed = embedding(VOCAB_SIZE, D_MODEL, base_vb.pp("embed"))?;
+
+        let mut layers = Vec::with_capacity(N_LAYERS);
+        for i in 0..N_LAYERS {
+            layers.push(TransformerBlock::new_split(
+                base_vb.pp(format!("layers.{i}")),
+                mem_vb.pp(format!("layers.{i}")),
+            )?);
+        }
+
+        let norm      = RMSNorm::new(D_MODEL, base_vb.pp("norm"))?;
+        let halt_head = candle_nn::linear(D_MODEL, 2, mem_vb.pp("halt_head"))?;
+
+        let mut addr_nets = Vec::with_capacity(N_ADDR_NETS);
+        for i in 0..N_ADDR_NETS {
+            addr_nets.push(AddrNet::new(
+                D_MODEL, ADDR_HIDDEN_DIM, ADDR_N_BINS, addr_vb.pp(format!("addr_nets.{i}")),
+            )?);
+        }
+
+        let v_proj = candle_nn::linear(D_MODEL, D_MODEL, addr_vb.pp("v_proj"))?;
+        let rope   = RoPE::new(HEAD_DIM, MAX_SEQ_LEN, ROPE_THETA, device)?;
 
         Ok(Self { embed, layers, norm, halt_head, addr_nets, v_proj, rope, device: device.clone() })
     }

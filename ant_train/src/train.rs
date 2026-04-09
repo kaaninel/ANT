@@ -1,7 +1,7 @@
 /// ANT Training — Phase A/B/C curriculum.
 
 use candle_core::{Device, Result, Tensor, DType, Var};
-use candle_nn::{VarMap, VarBuilder, Optimizer};
+use candle_nn::{VarMap, Optimizer};
 use candle_nn::optim::AdamW;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -11,6 +11,72 @@ use crate::config::*;
 use crate::model::ANT;
 use crate::engine::ANTEngine;
 use crate::data::{TextDataset, random_batch, load_all_texts, shell_texts, DataSplit};
+
+// ---------------------------------------------------------------------------
+// Parameter group tracking for curriculum freezing
+// ---------------------------------------------------------------------------
+
+/// Three named VarMaps that together hold all model parameters.
+///
+/// Phase A: only base_vm trained   (addr/mem receive no gradients — no memory ops)
+/// Phase B: only addr_vm + mem_vm  (base_vm frozen — learn to address and read/write)
+/// Phase C: only base_vm + mem_vm  (addr_vm frozen — base learns to USE memory)
+pub struct ModelVarMaps {
+    pub base: VarMap,   // embed, self-attn, FFN, final norm
+    pub addr: VarMap,   // addr_nets (×3), v_proj
+    pub mem:  VarMap,   // mem_attn, tag system, halt_head
+}
+
+impl ModelVarMaps {
+    pub fn new() -> Self {
+        Self { base: VarMap::new(), addr: VarMap::new(), mem: VarMap::new() }
+    }
+
+    pub fn base_vars(&self)         -> Vec<Var> { self.base.all_vars() }
+    pub fn addr_and_mem_vars(&self) -> Vec<Var> {
+        let mut v = self.addr.all_vars(); v.extend(self.mem.all_vars()); v
+    }
+    pub fn base_and_mem_vars(&self) -> Vec<Var> {
+        let mut v = self.base.all_vars(); v.extend(self.mem.all_vars()); v
+    }
+    pub fn all_vars(&self) -> Vec<Var> {
+        let mut v = self.base.all_vars();
+        v.extend(self.addr.all_vars());
+        v.extend(self.mem.all_vars());
+        v
+    }
+
+    pub fn count_params(vars: &[Var]) -> usize {
+        vars.iter().map(|v| v.as_tensor().elem_count()).sum()
+    }
+
+    pub fn save(&self, step: usize, phase: &str, ckpt_dir: &str) -> std::io::Result<()> {
+        std::fs::create_dir_all(ckpt_dir)?;
+        let path   = format!("{}/checkpoint_phase{}.safetensors", ckpt_dir, phase);
+        let latest = format!("{}/checkpoint_latest.safetensors",   ckpt_dir);
+
+        let mut data: std::collections::HashMap<String, candle_core::Tensor> =
+            std::collections::HashMap::new();
+        for (key, var) in self.base.data().lock().unwrap().iter() {
+            data.insert(key.clone(), var.as_tensor().clone());
+        }
+        for (key, var) in self.addr.data().lock().unwrap().iter() {
+            data.insert(key.clone(), var.as_tensor().clone());
+        }
+        for (key, var) in self.mem.data().lock().unwrap().iter() {
+            data.insert(key.clone(), var.as_tensor().clone());
+        }
+
+        if let Err(e) = candle_core::safetensors::save(&data, &path) {
+            eprintln!("  Warning: failed to save {}: {}", path, e);
+        } else {
+            println!("  Saved checkpoint: {} ({} tensors, step {})", path, data.len(), step);
+        }
+        let _ = std::fs::copy(&path, &latest);
+        Ok(())
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Cross-entropy loss (manual, since candle-nn doesn't have a built-in with pad)
@@ -48,28 +114,11 @@ fn cross_entropy_with_ignore(logits: &Tensor, targets: &Tensor, ignore_id: u32) 
 }
 
 // ---------------------------------------------------------------------------
-// Checkpoint I/O
+// Checkpoint I/O — kept for external callers; delegates to ModelVarMaps.save
 // ---------------------------------------------------------------------------
 
-pub fn save_checkpoint(var_map: &VarMap, step: usize, phase: &str, ckpt_dir: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(ckpt_dir)?;
-    let path = format!("{}/checkpoint_phase{}.safetensors", ckpt_dir, phase);
-    let latest = format!("{}/checkpoint_latest.safetensors", ckpt_dir);
-
-    let data: std::collections::HashMap<String, candle_core::Tensor> = var_map
-        .all_vars()
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (format!("param_{}", i), v.as_tensor().clone()))
-        .collect();
-
-    if let Err(e) = candle_core::safetensors::save(&data, &path) {
-        eprintln!("  Warning: failed to save {}: {}", path, e);
-    } else {
-        println!("  Saved checkpoint: {} (step {})", path, step);
-    }
-    let _ = std::fs::copy(&path, &latest);
-    Ok(())
+pub fn save_checkpoint(vms: &ModelVarMaps, step: usize, phase: &str, ckpt_dir: &str) -> std::io::Result<()> {
+    vms.save(step, phase, ckpt_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -172,15 +221,14 @@ impl Default for TrainConfig {
     }
 }
 
-pub fn phase_a(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
+pub fn phase_a(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
                device: &Device) -> Result<()>
 {
     println!("\n{}", "=".repeat(60));
     println!("  Phase A — Pure LM (no memory) | steps 0→{}", cfg.steps_a);
-    let n_params: usize = var_map.all_vars().iter()
-        .map(|v| v.as_tensor().elem_count())
-        .sum();
-    println!("  Params: {}", n_params);
+    // Phase A: only base params trained; addr/mem have no gradient path.
+    let params = vms.base_vars();
+    println!("  Trainable params: {} (base only)", ModelVarMaps::count_params(&params));
     println!("{}\n", "=".repeat(60));
 
     let mut texts = load_all_texts(&cfg.data_dir);
@@ -190,7 +238,7 @@ pub fn phase_a(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
     let split = DataSplit::from_texts(texts, 0.05);
     let dataset = TextDataset::new(split.train, cfg.max_seq_len);
 
-    let params: Vec<Var> = var_map.all_vars();
+    let params: Vec<Var> = params;
     let adamw_cfg = candle_nn::optim::ParamsAdamW {
         lr: cfg.lr_a,
         weight_decay: 0.01,
@@ -248,11 +296,11 @@ pub fn phase_a(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
         }
 
         if step % cfg.save_every == 0 {
-            let _ = save_checkpoint(var_map, step, "A_latest", &cfg.ckpt_dir);
+            let _ = save_checkpoint(vms, step, "A_latest", &cfg.ckpt_dir);
         }
     }
 
-    let _ = save_checkpoint(var_map, step, "A", &cfg.ckpt_dir);
+    let _ = save_checkpoint(vms, step, "A", &cfg.ckpt_dir);
     Ok(())
 }
 
@@ -260,26 +308,28 @@ pub fn phase_a(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
 // Phase B — Memory training (frozen base)
 // ---------------------------------------------------------------------------
 
-pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
+pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
                device: &Device) -> Result<()>
 {
     println!("\n{}", "=".repeat(60));
     println!("  Phase B — Memory Training (frozen base) | steps 0→{}", cfg.steps_b);
+    // Phase B: freeze base; train AddrNets, v_proj, mem_attn, tags, halt_head.
+    let params = vms.addr_and_mem_vars();
+    println!("  Trainable params: {} (addr + mem) | frozen: {} (base)",
+        ModelVarMaps::count_params(&params),
+        ModelVarMaps::count_params(&vms.base_vars()));
     println!("{}\n", "=".repeat(60));
 
     // Reset trie for clean Phase B start
     engine.reset_memory();
     println!("  Trie reset for Phase B");
 
-    // All vars go to optimizer. Phase B losses emphasize memory components.
-    // True layer freezing requires separate VarMaps (not easily done post-creation).
-    let all_vars: Vec<Var> = var_map.all_vars();
     let adamw_cfg = candle_nn::optim::ParamsAdamW {
         lr: cfg.lr_b,
         weight_decay: 0.01,
         ..Default::default()
     };
-    let mut opt = AdamW::new(all_vars, adamw_cfg)?;
+    let mut opt = AdamW::new(params, adamw_cfg)?;
 
     let mut texts = load_all_texts(&cfg.data_dir);
     texts.extend(shell_texts());
@@ -361,12 +411,12 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
         }
 
         if step % cfg.save_every == 0 {
-            let _ = save_checkpoint(var_map, step, "B_latest", &cfg.ckpt_dir);
+            let _ = save_checkpoint(vms, step, "B_latest", &cfg.ckpt_dir);
             engine.flush();
         }
     }
 
-    let _ = save_checkpoint(var_map, step, "B", &cfg.ckpt_dir);
+    let _ = save_checkpoint(vms, step, "B", &cfg.ckpt_dir);
     engine.flush();
     Ok(())
 }
@@ -375,20 +425,24 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
 // Phase C — End-to-end with memory
 // ---------------------------------------------------------------------------
 
-pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
+pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
                device: &Device) -> Result<()>
 {
     println!("\n{}", "=".repeat(60));
     println!("  Phase C — End-to-End with Memory | steps 0→{}", cfg.steps_c);
+    // Phase C: freeze addr (AddrNets + v_proj); train base + mem components.
+    let params = vms.base_and_mem_vars();
+    println!("  Trainable params: {} (base + mem) | frozen: {} (addr)",
+        ModelVarMaps::count_params(&params),
+        ModelVarMaps::count_params(&vms.addr.all_vars()));
     println!("{}\n", "=".repeat(60));
 
-    let all_vars = var_map.all_vars();
     let adamw_cfg = candle_nn::optim::ParamsAdamW {
         lr: cfg.lr_c,
         weight_decay: 0.01,
         ..Default::default()
     };
-    let mut opt = AdamW::new(all_vars, adamw_cfg)?;
+    let mut opt = AdamW::new(params, adamw_cfg)?;
 
     let mut texts = load_all_texts(&cfg.data_dir);
     texts.extend(shell_texts());
@@ -447,12 +501,12 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
         }
 
         if step % cfg.save_every == 0 {
-            let _ = save_checkpoint(var_map, step, "C_latest", &cfg.ckpt_dir);
+            let _ = save_checkpoint(vms, step, "C_latest", &cfg.ckpt_dir);
             engine.flush();
         }
     }
 
-    let _ = save_checkpoint(var_map, step, "C", &cfg.ckpt_dir);
+    let _ = save_checkpoint(vms, step, "C", &cfg.ckpt_dir);
     engine.flush();
     Ok(())
 }
@@ -462,21 +516,21 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, var_map: &VarMap,
 // ---------------------------------------------------------------------------
 
 pub fn run(cfg: TrainConfig, device: Device) -> Result<()> {
-    let var_map = VarMap::new();
-    let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
-    let model = ANT::new(vb, &device)?;
+    let vms = ModelVarMaps::new();
+    let model = ANT::new_split(&vms.base, &vms.addr, &vms.mem, &device)?;
     let mem_path = format!("{}/trie", cfg.ckpt_dir);
     let mut engine = ANTEngine::new(model, &mem_path, device.clone());
 
     println!("  ANT Rust training | device: {:?}", device);
-    let n_params: usize = var_map.all_vars().iter()
-        .map(|v| v.as_tensor().elem_count())
-        .sum();
-    println!("  Total params: {}", n_params);
+    let total = ModelVarMaps::count_params(&vms.all_vars());
+    let base_n = ModelVarMaps::count_params(&vms.base_vars());
+    let addr_n = ModelVarMaps::count_params(&vms.addr.all_vars());
+    let mem_n  = ModelVarMaps::count_params(&vms.mem.all_vars());
+    println!("  Total params: {} (base={} addr={} mem={})", total, base_n, addr_n, mem_n);
 
-    phase_a(&mut engine, &cfg, &var_map, &device)?;
-    phase_b(&mut engine, &cfg, &var_map, &device)?;
-    phase_c(&mut engine, &cfg, &var_map, &device)?;
+    phase_a(&mut engine, &cfg, &vms, &device)?;
+    phase_b(&mut engine, &cfg, &vms, &device)?;
+    phase_c(&mut engine, &cfg, &vms, &device)?;
 
     println!("\nTraining complete.");
     Ok(())
