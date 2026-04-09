@@ -362,12 +362,14 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
         let (mem_k, mem_v, mem_mask) = engine.read_for_encode(&seed_input, temperature, &mut rng)?;
 
         // ── Inner gradient loop: INNER_STEPS mini-batches share the same mem_vecs ──
-        let mut accumulated_loss: Option<Tensor> = None;
+        // Each inner step calls backward immediately to free the computation graph.
+        // Loss is scaled by 1/inner_steps so the total gradient magnitude is correct.
         let mut last_hidden: Option<Tensor> = None;
         let mut inner_lm = 0.0f32;
         let mut inner_contr = 0.0f32;
         let mut inner_depth = 0.0f32;
         let scale = 1.0 / cfg.inner_steps as f64;
+        let mut skip_step = false;
 
         for _inner in 0..cfg.inner_steps {
             let (batch_flat, b, t) = random_batch(&dataset, cfg.batch_b, &mut rng);
@@ -405,22 +407,19 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
             let inner_loss = ((l_lm + (l_contrastive * 0.1)?)? + l_depth)?;
             let inner_loss_scaled = (inner_loss * scale)?;
 
-            accumulated_loss = Some(match accumulated_loss {
-                None      => inner_loss_scaled,
-                Some(acc) => (acc + inner_loss_scaled)?,
-            });
+            let loss_val = inner_loss_scaled.to_scalar::<f32>()?;
+            if loss_val.is_nan() || loss_val.is_infinite() {
+                eprintln!("  NaN/inf loss at step {}, skipping", step);
+                skip_step = true;
+                break;
+            }
+
+            // Backward immediately — frees this step's computation graph before next inner step
+            opt.backward_step(&inner_loss_scaled)?;
             last_hidden = Some(hidden);
         }
 
-        let total_loss = accumulated_loss.unwrap();
-        let loss_val = total_loss.to_scalar::<f32>()?;
-        if loss_val.is_nan() || loss_val.is_infinite() {
-            eprintln!("  NaN/inf loss at step {}, skipping", step);
-            step += 1;
-            continue;
-        }
-
-        opt.backward_step(&total_loss)?;
+        if skip_step { step += 1; continue; }
 
         // ── Trie write: once per cycle using the last inner step's hidden states ──
         if let Some(h) = last_hidden {
@@ -505,9 +504,10 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
         let (mem_k, mem_v, mem_mask) = engine.read_for_encode(&seed_input, 1.0, &mut rng)?;
 
         // ── Inner gradient loop ──
-        let mut accumulated_loss: Option<Tensor> = None;
+        // Each inner step calls backward immediately — no graph accumulation across steps.
         let mut last_hidden: Option<Tensor> = None;
         let scale = 1.0 / cfg.inner_steps as f64;
+        let mut skip_step = false;
 
         for _inner in 0..cfg.inner_steps {
             let (batch_flat, b, t) = random_batch(&dataset, cfg.batch_c, &mut rng);
@@ -532,22 +532,19 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
             running_loss += l.to_scalar::<f32>()?;
 
             let l_scaled = (l * scale)?;
-            accumulated_loss = Some(match accumulated_loss {
-                None      => l_scaled,
-                Some(acc) => (acc + l_scaled)?,
-            });
+            let loss_val = l_scaled.to_scalar::<f32>()?;
+            if loss_val.is_nan() || loss_val.is_infinite() {
+                eprintln!("  NaN/inf loss at step {}, skipping", step);
+                skip_step = true;
+                break;
+            }
+
+            // Backward immediately — frees this step's graph before the next inner step
+            opt.backward_step(&l_scaled)?;
             last_hidden = Some(hidden);
         }
 
-        let total_loss = accumulated_loss.unwrap();
-        let loss_val = total_loss.to_scalar::<f32>()?;
-        if loss_val.is_nan() || loss_val.is_infinite() {
-            eprintln!("  NaN/inf loss at step {}, skipping", step);
-            step += 1;
-            continue;
-        }
-
-        opt.backward_step(&total_loss)?;
+        if skip_step { step += 1; continue; }
 
         // ── Trie write: once per cycle ──
         if let Some(h) = last_hidden {
