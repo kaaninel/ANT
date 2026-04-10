@@ -353,19 +353,49 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
     let mut running_depth = 0.0f32;
     let mut t0 = Instant::now();
 
+    // Async prefetch state: pending trie read + pre-sampled seed for next step
+    let mut pending_read: Option<crate::engine::PrefetchHandle> = None;
+    let mut pending_seed: Option<(Vec<u32>, usize, usize)> = None; // (seed_in, b, t1)
+
     while step < cfg.steps_b {
         let temperature = (1.0f32 - step as f32 / cfg.steps_b as f32).max(0.5);
 
-        // ── Trie read: one pass-1 forward + trie read shared across inner steps ──
-        let (seed_flat, seed_b, seed_t) = random_batch(&dataset, cfg.batch_b, &mut rng);
-        let seed_t1 = seed_t.saturating_sub(1);
-        let mut seed_in: Vec<u32> = Vec::with_capacity(seed_b * seed_t1);
-        for bi in 0..seed_b {
-            seed_in.extend_from_slice(&seed_flat[bi*seed_t .. bi*seed_t + seed_t1]);
-        }
+        // ── Trie read: use prefetched result if available, else read synchronously ──
+        let (seed_in, seed_b, seed_t1) = if let Some(s) = pending_seed.take() {
+            s
+        } else {
+            let (flat, sb, st) = random_batch(&dataset, cfg.batch_b, &mut rng);
+            let t1 = st.saturating_sub(1);
+            let mut v: Vec<u32> = Vec::with_capacity(sb * t1);
+            for bi in 0..sb { v.extend_from_slice(&flat[bi*st .. bi*st + t1]); }
+            (v, sb, t1)
+        };
         let seed_input = Tensor::from_vec(seed_in, (seed_b, seed_t1), device)?;
         engine.reset_state(seed_b)?;
-        let (mem_k, mem_v, mem_mask) = engine.read_for_encode(&seed_input, temperature, &mut rng)?;
+
+        let (mem_k, mem_v, mem_mask) = if let Some(handle) = pending_read.take() {
+            handle.resolve(device)?
+        } else {
+            engine.read_for_encode(&seed_input, temperature, &mut rng)?
+        };
+
+        // ── Pre-fetch trie read for NEXT outer step ──
+        // Sample next seed, run pass-1 forward, compute addresses, spawn BG read.
+        // This overlaps ~1.5s CPU trie read with the current step's GPU inner loop.
+        {
+            let (nf, nb, nt) = random_batch(&dataset, cfg.batch_b, &mut rng);
+            let nt1 = nt.saturating_sub(1);
+            let mut nv: Vec<u32> = Vec::with_capacity(nb * nt1);
+            for bi in 0..nb { nv.extend_from_slice(&nf[bi*nt .. bi*nt + nt1]); }
+            let next_seed = Tensor::from_vec(nv.clone(), (nb, nt1), device)?;
+            match engine.compute_seed_addrs(&next_seed, temperature, &mut rng) {
+                Ok((next_addrs, nb2)) => {
+                    pending_read = Some(engine.spawn_prefetch_read(next_addrs, nb2));
+                    pending_seed = Some((nv, nb, nt1));
+                }
+                Err(_) => {} // fall back to sync read next iteration
+            }
+        }
 
         // ── Inner gradient loop: INNER_STEPS mini-batches share the same mem_vecs ──
         // Each inner step calls backward immediately to free the computation graph.
@@ -427,9 +457,12 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
 
         if skip_step { step += 1; continue; }
 
-        // ── Trie write: once per cycle using the last inner step's hidden states ──
+        // ── Trie write: extract CPU data on main thread, then fire-and-forget ──
         if let Some(h) = last_hidden {
-            engine.write_hidden(&h, temperature, &mut rng)?;
+            match engine.extract_write_data(&h, temperature, &mut rng) {
+                Ok(write_data) => engine.spawn_async_write(write_data),
+                Err(_) => { let _ = engine.write_hidden(&h, temperature, &mut rng); }
+            }
         }
 
         step += 1;
@@ -501,17 +534,45 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
     let mut running_loss = 0.0f32;
     let mut t0 = Instant::now();
 
+    // Async prefetch state
+    let mut pending_read: Option<crate::engine::PrefetchHandle> = None;
+    let mut pending_seed: Option<(Vec<u32>, usize, usize)> = None;
+
     while step < cfg.steps_c {
-        // ── Trie read: shared across inner steps ──
-        let (seed_flat, seed_b, seed_t) = random_batch(&dataset, cfg.batch_c, &mut rng);
-        let seed_t1 = seed_t.saturating_sub(1);
-        let mut seed_in: Vec<u32> = Vec::with_capacity(seed_b * seed_t1);
-        for bi in 0..seed_b {
-            seed_in.extend_from_slice(&seed_flat[bi*seed_t .. bi*seed_t + seed_t1]);
-        }
+        // ── Trie read: use prefetched result if available, else read synchronously ──
+        let (seed_in, seed_b, seed_t1) = if let Some(s) = pending_seed.take() {
+            s
+        } else {
+            let (flat, sb, st) = random_batch(&dataset, cfg.batch_c, &mut rng);
+            let t1 = st.saturating_sub(1);
+            let mut v: Vec<u32> = Vec::with_capacity(sb * t1);
+            for bi in 0..sb { v.extend_from_slice(&flat[bi*st .. bi*st + t1]); }
+            (v, sb, t1)
+        };
         let seed_input = Tensor::from_vec(seed_in, (seed_b, seed_t1), device)?;
         engine.reset_state(seed_b)?;
-        let (mem_k, mem_v, mem_mask) = engine.read_for_encode(&seed_input, 1.0, &mut rng)?;
+
+        let (mem_k, mem_v, mem_mask) = if let Some(handle) = pending_read.take() {
+            handle.resolve(device)?
+        } else {
+            engine.read_for_encode(&seed_input, 1.0, &mut rng)?
+        };
+
+        // ── Pre-fetch trie read for next outer step ──
+        {
+            let (nf, nb, nt) = random_batch(&dataset, cfg.batch_c, &mut rng);
+            let nt1 = nt.saturating_sub(1);
+            let mut nv: Vec<u32> = Vec::with_capacity(nb * nt1);
+            for bi in 0..nb { nv.extend_from_slice(&nf[bi*nt .. bi*nt + nt1]); }
+            let next_seed = Tensor::from_vec(nv.clone(), (nb, nt1), device)?;
+            match engine.compute_seed_addrs(&next_seed, 1.0, &mut rng) {
+                Ok((next_addrs, nb2)) => {
+                    pending_read = Some(engine.spawn_prefetch_read(next_addrs, nb2));
+                    pending_seed = Some((nv, nb, nt1));
+                }
+                Err(_) => {}
+            }
+        }
 
         // ── Inner gradient loop ──
         // Each inner step calls backward immediately — no graph accumulation across steps.
@@ -556,9 +617,12 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
 
         if skip_step { step += 1; continue; }
 
-        // ── Trie write: once per cycle ──
+        // ── Trie write: extract CPU data on main thread, then fire-and-forget ──
         if let Some(h) = last_hidden {
-            engine.write_hidden(&h, 1.0, &mut rng)?;
+            match engine.extract_write_data(&h, 1.0, &mut rng) {
+                Ok(write_data) => engine.spawn_async_write(write_data),
+                Err(_) => { let _ = engine.write_hidden(&h, 1.0, &mut rng); }
+            }
         }
 
         step += 1;

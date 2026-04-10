@@ -3,6 +3,7 @@
 /// Training: two-pass encode() for correct address distribution.
 /// Inference: true per-token generate() with live trie updates.
 
+use std::sync::Arc;
 use candle_core::{Device, Result, Tensor, DType};
 use rand::Rng;
 
@@ -10,9 +11,31 @@ use crate::config::*;
 use crate::model::{ANT, KVCache};
 use crate::trie::MemorySystem;
 
+/// Handle for an in-flight background trie read.
+/// Call `resolve()` to block until done and materialise GPU tensors.
+pub struct PrefetchHandle {
+    rx: std::sync::mpsc::Receiver<(Vec<f32>, Vec<bool>)>,
+    pub b: usize,
+}
+
+impl PrefetchHandle {
+    pub fn resolve(self, device: &Device) -> Result<(Tensor, Tensor, Tensor)> {
+        let (vecs_flat, mask_flat) = self.rx.recv()
+            .map_err(|_| candle_core::Error::Msg("prefetch trie-read thread panicked".to_string()))?;
+        let s = N_MEM_SLOTS;
+        let d = D_MODEL;
+        let vecs = Tensor::from_vec(vecs_flat, (self.b, s, d), device)?;
+        let mask_f32: Vec<f32> = mask_flat.iter()
+            .map(|&m| if m { 0.0 } else { f32::NEG_INFINITY })
+            .collect();
+        let mask = Tensor::from_vec(mask_f32, (self.b, s), device)?;
+        Ok((vecs.clone(), vecs, mask))
+    }
+}
+
 pub struct ANTEngine {
     pub model: ANT,
-    pub memory: MemorySystem,
+    pub memory: Arc<MemorySystem>,
     pub device: Device,
     /// Persistent tag register: (B, d_model)
     pub tag_register: Option<Tensor>,
@@ -20,9 +43,9 @@ pub struct ANTEngine {
 
 impl ANTEngine {
     pub fn new(model: ANT, mem_path: &str, device: Device) -> Self {
-        let memory = MemorySystem::new(
+        let memory = Arc::new(MemorySystem::new(
             mem_path, D_MODEL, MEM_DEPTH_CAP,
-            MEM_EMA_ALPHA_BASE, MEM_EMA_ALPHA_MIN, MEM_FLUSH_INTERVAL);
+            MEM_EMA_ALPHA_BASE, MEM_EMA_ALPHA_MIN, MEM_FLUSH_INTERVAL));
         Self { model, memory, device, tag_register: None }
     }
 
@@ -106,6 +129,76 @@ impl ANTEngine {
         };
         self.memory.write_batch(&batch_addrs, &val_refs);
         Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Async trie I/O — overlap CPU trie ops with GPU inner steps
+    // ---------------------------------------------------------------------------
+
+    /// Run pass-1 forward on `token_ids` and compute AddrNet addresses.
+    /// Returns CPU-serializable batch_addrs ready to be sent to a background thread.
+    pub fn compute_seed_addrs(&self, token_ids: &Tensor, temperature: f32,
+                               rng: &mut impl Rng)
+        -> Result<(Vec<Vec<Vec<u8>>>, usize)>
+    {
+        let b = token_ids.dim(0)?;
+        let tag = self.tag_register.as_ref().map(|t| t.clone());
+        let (_, _, hidden_p1) = self.model.forward(
+            &token_ids.detach(), None, None, None, tag.as_ref(), None)?;
+        let h_mean = hidden_p1.mean(1)?.detach();
+        let addr_tensors = self.model.compute_addresses(&h_mean, temperature, false, rng)?;
+        let batch_addrs = Self::addrs_to_bytes(&addr_tensors)?;
+        Ok((batch_addrs, b))
+    }
+
+    /// Spawn a background thread to read the trie from pre-computed addresses.
+    /// The thread holds an Arc clone of the MemorySystem — no locking on main thread.
+    pub fn spawn_prefetch_read(&self, batch_addrs: Vec<Vec<Vec<u8>>>, b: usize) -> PrefetchHandle {
+        let memory = Arc::clone(&self.memory);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = memory.read_batch(&batch_addrs, N_MEM_SLOTS);
+            let _ = tx.send(result);
+        });
+        PrefetchHandle { rx, b }
+    }
+
+    /// Extract write data from a (B, T, d) hidden tensor: runs GPU v_proj + AddrNet,
+    /// returns CPU-serializable (addrs, values) pairs per token step.
+    pub fn extract_write_data(&self, hidden: &Tensor, temperature: f32,
+                               rng: &mut impl Rng)
+        -> Result<Vec<(Vec<Vec<Vec<u8>>>, Vec<Vec<f32>>)>>
+    {
+        let (b, t, _) = hidden.dims3()?;
+        let mut token_data = Vec::with_capacity(t);
+        for ti in 0..t {
+            let mut h_rows: Vec<Tensor> = Vec::with_capacity(b);
+            for bi in 0..b {
+                h_rows.push(hidden.get(bi)?.get(ti)?.unsqueeze(0)?);
+            }
+            let h_batch = Tensor::cat(&h_rows, 0)?.detach();
+
+            let values = self.model.compute_value(&h_batch)?;
+            let values_cpu = values.to_vec2::<f32>()?;
+
+            let addr_tensors = self.model.compute_addresses(
+                &h_batch, temperature, false, rng)?;
+            let batch_addrs = Self::addrs_to_bytes(&addr_tensors)?;
+
+            token_data.push((batch_addrs, values_cpu));
+        }
+        Ok(token_data)
+    }
+
+    /// Fire-and-forget: spawn background thread to write pre-extracted token data to trie.
+    pub fn spawn_async_write(&self, write_data: Vec<(Vec<Vec<Vec<u8>>>, Vec<Vec<f32>>)>) {
+        let memory = Arc::clone(&self.memory);
+        std::thread::spawn(move || {
+            for (batch_addrs, values_cpu) in write_data {
+                let val_refs: Vec<&[f32]> = values_cpu.iter().map(|v| v.as_slice()).collect();
+                memory.write_batch(&batch_addrs, &val_refs);
+            }
+        });
     }
 
     // ---------------------------------------------------------------------------
