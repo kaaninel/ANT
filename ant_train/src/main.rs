@@ -5,6 +5,7 @@
 
 mod config;
 mod trie;
+mod cpu_addr;
 mod model;
 mod engine;
 mod data;

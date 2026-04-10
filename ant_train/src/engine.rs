@@ -10,6 +10,7 @@ use rand::Rng;
 use crate::config::*;
 use crate::model::{ANT, KVCache};
 use crate::trie::MemorySystem;
+use crate::cpu_addr::CpuAddrBank;
 
 /// Handle for an in-flight background trie read.
 /// Call `resolve()` to block until done and materialise GPU tensors.
@@ -39,6 +40,9 @@ pub struct ANTEngine {
     pub device: Device,
     /// Persistent tag register: (B, d_model)
     pub tag_register: Option<Tensor>,
+    /// CPU-resident AddrNet bank — populated once at end of Phase B,
+    /// drives ALL address computation in Phase C and inference.
+    pub cpu_addr_bank: Arc<CpuAddrBank>,
 }
 
 impl ANTEngine {
@@ -46,12 +50,26 @@ impl ANTEngine {
         let memory = Arc::new(MemorySystem::new(
             mem_path, D_MODEL, MEM_DEPTH_CAP,
             MEM_EMA_ALPHA_BASE, MEM_EMA_ALPHA_MIN, MEM_FLUSH_INTERVAL));
-        Self { model, memory, device, tag_register: None }
+        let cpu_addr_bank = Arc::new(CpuAddrBank::new_zeroed());
+        Self { model, memory, device, tag_register: None, cpu_addr_bank }
     }
 
     pub fn reset_state(&mut self, batch_size: usize) -> Result<()> {
         self.tag_register = Some(Tensor::zeros(
             (batch_size, D_MODEL), DType::F32, &self.device)?);
+        Ok(())
+    }
+
+    /// Finalize Phase B: sync GPU AddrNet weights → CpuAddrBank, then drop GPU addr_nets.
+    ///
+    /// Must be called before Phase C or inference. After this:
+    ///   - model.addr_nets is None (GPU tensors freed)
+    ///   - cpu_addr_bank holds the final trained weights
+    ///   - All address computation uses the CPU path
+    pub fn finalize_phase_b(&mut self) -> Result<()> {
+        self.model.sync_cpu_addr_bank(&self.cpu_addr_bank)?;
+        self.model.drop_addr_nets();
+        println!("  [Engine] Phase B finalized: AddrNet synced to CpuAddrBank, GPU tensors freed.");
         Ok(())
     }
 
@@ -64,9 +82,27 @@ impl ANTEngine {
         ANT::addrs_to_bytes(addr_tensors)
     }
 
+    /// Compute batch addresses using CPU AddrNet bank.
+    /// hidden: (B, d) tensor — transferred to CPU, addresses computed via CpuAddrBank.
+    /// Returns [B][N_ADDR_NETS][ADDR_DEPTH] — same format as addrs_to_bytes output.
+    fn compute_batch_addrs_cpu(&self, hidden: &Tensor) -> Result<Vec<Vec<Vec<u8>>>> {
+        let b = hidden.dim(0)?;
+        let h_cpu = hidden.to_vec2::<f32>()?;
+        // per_net: [N_ADDR_NETS][B][ADDR_DEPTH]
+        let per_net = self.cpu_addr_bank.forward_all_batch(&h_cpu);
+        // Transpose to [B][N_ADDR_NETS][ADDR_DEPTH]
+        let batch = (0..b)
+            .map(|bi| per_net.iter().map(|net| net[bi].clone()).collect())
+            .collect();
+        Ok(batch)
+    }
+
     /// Read from trie, return (mem_keys, mem_values, mem_mask_f32).
     /// mem_keys == mem_values (trie stores single vector per node).
     /// mem_mask_f32: 0.0 = valid, -inf = invalid (for attn masking).
+    ///
+    /// Address computation: GPU AddrNet during Phase B (addr_nets Some),
+    /// CpuAddrBank during Phase C and inference (addr_nets None).
     pub fn read_memory(&self, hidden: &Tensor, temperature: f32, rng: &mut impl Rng)
         -> Result<(Tensor, Tensor, Tensor)>
     {
@@ -74,17 +110,19 @@ impl ANTEngine {
         let s = N_MEM_SLOTS;
         let d = D_MODEL;
 
-        let addr_tensors = self.model.compute_addresses(hidden, temperature, false, rng)?;
-        let batch_addrs = Self::addrs_to_bytes(&addr_tensors)?;
+        let batch_addrs = if self.model.addr_nets.is_some() {
+            let addr_tensors = self.model.compute_addresses(hidden, temperature, false, rng)?;
+            Self::addrs_to_bytes(&addr_tensors)?
+        } else {
+            self.compute_batch_addrs_cpu(hidden)?
+        };
 
         let (vecs_flat, mask_flat) = self.memory.read_batch(&batch_addrs, s);
 
-        // Build mem_keys tensor
         let vecs = Tensor::from_vec(vecs_flat, (b, s, d), &self.device)?;
-
-        // Guard: zero out NaN/inf slots, set mask to -inf
-        // For simplicity, build mask_f32 directly from bool mask
-        let mask_f32_flat: Vec<f32> = mask_flat.iter().map(|&m| if m { 0.0 } else { f32::NEG_INFINITY }).collect();
+        let mask_f32_flat: Vec<f32> = mask_flat.iter()
+            .map(|&m| if m { 0.0 } else { f32::NEG_INFINITY })
+            .collect();
         let mask_f32 = Tensor::from_vec(mask_f32_flat, (b, s), &self.device)?;
 
         Ok((vecs.clone(), vecs, mask_f32))
@@ -135,9 +173,13 @@ impl ANTEngine {
             Tensor::stack(&rows, 0)?
         };
 
-        let addr_tensors = self.model.compute_addresses(
-            &filtered_addr_hidden, temperature, false, rng)?;
-        let batch_addrs = Self::addrs_to_bytes(&addr_tensors)?;
+        let batch_addrs = if self.model.addr_nets.is_some() {
+            let addr_tensors = self.model.compute_addresses(
+                &filtered_addr_hidden, temperature, false, rng)?;
+            Self::addrs_to_bytes(&addr_tensors)?
+        } else {
+            self.compute_batch_addrs_cpu(&filtered_addr_hidden)?
+        };
 
         let val_refs: Vec<&[f32]> = if valid.iter().all(|&v| v) {
             values_np.iter().map(|row| row.as_slice()).collect()
@@ -155,7 +197,10 @@ impl ANTEngine {
     // ---------------------------------------------------------------------------
 
     /// Run pass-1 forward on `token_ids` and compute AddrNet addresses.
-    /// Returns CPU-serializable batch_addrs ready to be sent to a background thread.
+    ///
+    /// Phase B (addr_nets Some): GPU AddrNet computes addresses.
+    /// Phase C / inference (addr_nets None): CpuAddrBank computes addresses —
+    ///   the hidden→CPU transfer is a tiny 128×B×4 bytes, addr MLP is 10.5K ops.
     pub fn compute_seed_addrs(&self, token_ids: &Tensor, temperature: f32,
                                rng: &mut impl Rng)
         -> Result<(Vec<Vec<Vec<u8>>>, usize)>
@@ -165,13 +210,19 @@ impl ANTEngine {
         let (_, _, hidden_p1) = self.model.forward(
             &token_ids.detach(), None, None, None, tag.as_ref(), None)?;
         let h_mean = hidden_p1.mean(1)?.detach();
-        let addr_tensors = self.model.compute_addresses(&h_mean, temperature, false, rng)?;
-        let batch_addrs = Self::addrs_to_bytes(&addr_tensors)?;
+
+        let batch_addrs = if self.model.addr_nets.is_some() {
+            let addr_tensors = self.model.compute_addresses(&h_mean, temperature, false, rng)?;
+            Self::addrs_to_bytes(&addr_tensors)?
+        } else {
+            self.compute_batch_addrs_cpu(&h_mean)?
+        };
         Ok((batch_addrs, b))
     }
 
     /// Spawn a background thread to read the trie from pre-computed addresses.
-    /// The thread holds an Arc clone of the MemorySystem — no locking on main thread.
+    /// The thread holds an Arc clone of the MemorySystem.
+    /// With RwLock on the trie, multiple concurrent reads are possible.
     pub fn spawn_prefetch_read(&self, batch_addrs: Vec<Vec<Vec<u8>>>, b: usize) -> PrefetchHandle {
         let memory = Arc::clone(&self.memory);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -182,11 +233,36 @@ impl ANTEngine {
         PrefetchHandle { rx, b }
     }
 
-    /// Extract write data from a (B, T, d) hidden tensor: runs GPU v_proj + AddrNet,
-    /// returns CPU-serializable (addrs, values) pairs per token step.
+    /// Proactive prefetch for Phase C: transfers h_mean to CPU then dispatches
+    /// BOTH address computation AND trie read to a background thread.
     ///
-    /// `next_token_ids`: optional (B, T) — when provided, addresses are conditioned
-    /// on the next token embedding (forward-looking writes).
+    /// This fully decouples address computation + trie I/O from the GPU timeline.
+    /// Use instead of compute_seed_addrs + spawn_prefetch_read in Phase C.
+    pub fn spawn_proactive_prefetch(&self, h_mean: &Tensor) -> Result<PrefetchHandle> {
+        let b = h_mean.dim(0)?;
+        let h_cpu = h_mean.to_vec2::<f32>()?;
+        let bank = Arc::clone(&self.cpu_addr_bank);
+        let memory = Arc::clone(&self.memory);
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            // Address computation: pure CPU, ~1ms for 10.5K params
+            let per_net = bank.forward_all_batch(&h_cpu);
+            let batch_addrs: Vec<Vec<Vec<u8>>> = (0..b)
+                .map(|bi| per_net.iter().map(|net| net[bi].clone()).collect())
+                .collect();
+            // Trie read: RwLock — concurrent with other reads
+            let result = memory.read_batch(&batch_addrs, N_MEM_SLOTS);
+            let _ = tx.send(result);
+        });
+
+        Ok(PrefetchHandle { rx, b })
+    }
+
+    /// Extract write data from a (B, T, d) hidden tensor.
+    ///
+    /// Phase B (addr_nets Some): GPU AddrNet computes addresses.
+    /// Phase C / inference (addr_nets None): CpuAddrBank computes addresses.
     pub fn extract_write_data(&self, hidden: &Tensor, temperature: f32,
                                next_token_ids: Option<&Tensor>,
                                rng: &mut impl Rng)
@@ -222,9 +298,13 @@ impl ANTEngine {
                 h_batch
             };
 
-            let addr_tensors = self.model.compute_addresses(
-                &addr_input, temperature, false, rng)?;
-            let batch_addrs = Self::addrs_to_bytes(&addr_tensors)?;
+            let batch_addrs = if self.model.addr_nets.is_some() {
+                let addr_tensors = self.model.compute_addresses(
+                    &addr_input, temperature, false, rng)?;
+                Self::addrs_to_bytes(&addr_tensors)?
+            } else {
+                self.compute_batch_addrs_cpu(&addr_input)?
+            };
 
             token_data.push((batch_addrs, values_cpu));
         }

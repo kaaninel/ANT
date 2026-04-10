@@ -197,6 +197,19 @@ impl AddrNet {
         let addrs = Tensor::stack(&bins, 1)?;
         Ok((addrs, all_logits))
     }
+
+    /// Extract weight matrices as CPU Vec<Vec<f32>> for CpuAddrNet construction.
+    /// Returns (proj_in, bin_embed, mlp, out_w), each as row-major Vec<Vec<f32>>.
+    pub fn extract_cpu_weights(&self)
+        -> candle_core::Result<(Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>)>
+    {
+        Ok((
+            self.proj_in.weight().to_vec2::<f32>()?,
+            self.bin_embed.embeddings().to_vec2::<f32>()?,
+            self.mlp.weight().to_vec2::<f32>()?,
+            self.out.weight().to_vec2::<f32>()?,
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -444,8 +457,8 @@ pub struct ANT {
     pub layers: Vec<TransformerBlock>,
     pub norm: RMSNorm,
     pub halt_head: Linear,
-    pub addr_nets: Vec<AddrNet>,
-    // v_proj uses bias (matches Python nn.Linear default)
+    /// None after Phase B finalization — GPU addr_nets are dropped, CpuAddrBank takes over.
+    pub addr_nets: Option<Vec<AddrNet>>,
     pub v_proj: candle_nn::Linear,
     pub rope: RoPE,
     device: Device,
@@ -472,7 +485,7 @@ impl ANT {
         let v_proj = candle_nn::linear(D_MODEL, D_MODEL, vb.pp("v_proj"))?;
         let rope = RoPE::new(HEAD_DIM, MAX_SEQ_LEN, ROPE_THETA, device)?;
 
-        Ok(Self { embed, layers, norm, halt_head, addr_nets, v_proj, rope, device: device.clone() })
+        Ok(Self { embed, layers, norm, halt_head, addr_nets: Some(addr_nets), v_proj, rope, device: device.clone() })
     }
 
     /// Construct with 3 separate VarMaps for parameter group isolation:
@@ -509,31 +522,42 @@ impl ANT {
         let v_proj = candle_nn::linear(D_MODEL, D_MODEL, addr_vb.pp("v_proj"))?;
         let rope   = RoPE::new(HEAD_DIM, MAX_SEQ_LEN, ROPE_THETA, device)?;
 
-        Ok(Self { embed, layers, norm, halt_head, addr_nets, v_proj, rope, device: device.clone() })
+        Ok(Self { embed, layers, norm, halt_head, addr_nets: Some(addr_nets), v_proj, rope, device: device.clone() })
+    }
+
+    /// Drop GPU addr_nets after Phase B — CpuAddrBank takes over all address computation.
+    pub fn drop_addr_nets(&mut self) {
+        self.addr_nets = None;
     }
 
     /// Compute 3 hierarchical addresses from hidden state (B, d).
     /// Returns Vec of N tensors, each (B, depth) as u32.
+    /// Panics if addr_nets were dropped (use CpuAddrBank after Phase B).
     pub fn compute_addresses(&self, hidden: &Tensor, temperature: f32, training: bool,
                               rng: &mut impl Rng)
         -> Result<Vec<Tensor>>
     {
+        let nets = self.addr_nets.as_ref().ok_or_else(||
+            candle_core::Error::Msg("addr_nets dropped after Phase B; use CpuAddrBank".into()))?;
         let mut addrs = Vec::with_capacity(N_ADDR_NETS);
-        for net in &self.addr_nets {
+        for net in nets {
             let (a, _) = net.forward(hidden, temperature, training, rng)?;
             addrs.push(a);
         }
         Ok(addrs)
     }
 
-    /// Compute addresses with logits for training losses.
+    /// Compute addresses with logits for Phase B training losses.
+    /// Only valid while addr_nets are present (Phase B only).
     pub fn compute_addresses_with_logits(&self, hidden: &Tensor, temperature: f32,
                                           training: bool, rng: &mut impl Rng)
         -> Result<(Vec<Tensor>, Vec<Vec<Tensor>>)>
     {
+        let nets = self.addr_nets.as_ref().ok_or_else(||
+            candle_core::Error::Msg("addr_nets dropped after Phase B".into()))?;
         let mut addrs = Vec::new();
         let mut all_logits = Vec::new();
-        for net in &self.addr_nets {
+        for net in nets {
             let (a, l) = net.forward(hidden, temperature, training, rng)?;
             addrs.push(a);
             all_logits.push(l);
@@ -619,5 +643,24 @@ impl ANT {
         let halt_logits = self.halt_head.forward(&hidden)?;
 
         Ok((logits, halt_logits, hidden))
+    }
+
+    /// Sync CPU-resident AddrNet weights from GPU model.
+    ///
+    /// Call this after every Phase B optimizer step to keep the CpuAddrBank
+    /// current with the latest gradient updates.
+    pub fn sync_cpu_addr_bank(&self, bank: &crate::cpu_addr::CpuAddrBank)
+        -> candle_core::Result<()>
+    {
+        let nets = self.addr_nets.as_ref().ok_or_else(||
+            candle_core::Error::Msg("addr_nets already dropped".into()))?;
+        let mut new_nets = Vec::with_capacity(crate::config::N_ADDR_NETS);
+        for net in nets {
+            let (proj_in, bin_embed, mlp, out_w) = net.extract_cpu_weights()?;
+            new_nets.push(crate::cpu_addr::CpuAddrNet::from_weights(
+                proj_in, bin_embed, mlp, out_w));
+        }
+        bank.update(new_nets);
+        Ok(())
     }
 }

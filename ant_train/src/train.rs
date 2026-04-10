@@ -562,17 +562,31 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
             engine.read_for_encode(&seed_input, 1.0, &mut rng)?
         };
 
-        // ── Pre-fetch trie read for next outer step ──
+        // ── Pre-fetch trie read for next outer step — fully offloaded to background ──
+        // Pass-1 forward gives h_mean, then background thread does:
+        //   CpuAddrBank.forward_all_batch(h_mean) + trie read (RwLock)
+        // GPU is free to start the inner loop immediately after the forward.
         {
             let (nf, nb, nt) = random_batch(&dataset, cfg.batch_c, &mut rng);
             let nt1 = nt.saturating_sub(1);
             let mut nv: Vec<u32> = Vec::with_capacity(nb * nt1);
             for bi in 0..nb { nv.extend_from_slice(&nf[bi*nt .. bi*nt + nt1]); }
             let next_seed = Tensor::from_vec(nv.clone(), (nb, nt1), device)?;
-            match engine.compute_seed_addrs(&next_seed, 1.0, &mut rng) {
-                Ok((next_addrs, nb2)) => {
-                    pending_read = Some(engine.spawn_prefetch_read(next_addrs, nb2));
-                    pending_seed = Some((nv, nb, nt1));
+            let tag = engine.tag_register.as_ref().map(|t| t.clone());
+            match engine.model.forward(&next_seed.detach(), None, None, None, tag.as_ref(), None) {
+                Ok((_, _, hidden_p1)) => {
+                    match hidden_p1.mean(1) {
+                        Ok(h_mean) => {
+                            match engine.spawn_proactive_prefetch(&h_mean.detach()) {
+                                Ok(handle) => {
+                                    pending_read = Some(handle);
+                                    pending_seed = Some((nv, nb, nt1));
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                        Err(_) => {}
+                    }
                 }
                 Err(_) => {}
             }
@@ -749,6 +763,10 @@ pub fn run(cfg: TrainConfig, device: Device) -> Result<()> {
     } else {
         println!("  Skipping Phase B (start_phase={})", cfg.start_phase);
     }
+
+    // Sync AddrNet weights to CpuAddrBank and drop GPU addr_nets.
+    // Must happen regardless of whether Phase B ran (checkpoint may have trained weights).
+    engine.finalize_phase_b()?;
 
     phase_c(&mut engine, &cfg, &vms, &device)?;
 

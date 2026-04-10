@@ -182,12 +182,12 @@ impl HierarchicalTrie {
 // Memory system wrapper (no PyO3)
 // ---------------------------------------------------------------------------
 
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::path::PathBuf;
 use std::fs;
 
 pub struct MemorySystem {
-    pub trie: Mutex<HierarchicalTrie>,
+    pub trie: RwLock<HierarchicalTrie>,
     bin_path: PathBuf,
     pub d_model: usize,
     pub alpha_base: f32,
@@ -210,7 +210,7 @@ impl MemorySystem {
             HierarchicalTrie::new(d_model, depth_cap)
         };
         Self {
-            trie: Mutex::new(trie),
+            trie: RwLock::new(trie),
             bin_path,
             d_model,
             alpha_base,
@@ -222,7 +222,7 @@ impl MemorySystem {
 
     /// Batch write: batch_addresses[b][n] = address for sample b, addr_net n
     pub fn write_batch(&self, batch_addresses: &Vec<Vec<Vec<u8>>>, batch_values: &[&[f32]]) {
-        let mut trie = self.trie.lock().unwrap();
+        let mut trie = self.trie.write().unwrap();
         for (b, addrs) in batch_addresses.iter().enumerate() {
             let val = batch_values[b];
             for addr in addrs {
@@ -240,10 +240,11 @@ impl MemorySystem {
 
     /// Batch read: returns (vectors, mask) as flat f32 vecs.
     /// vectors: [B, max_vectors, d_model], mask: [B, max_vectors]
+    /// Uses RwLock read — multiple concurrent reads allowed.
     pub fn read_batch(&self, batch_addresses: &Vec<Vec<Vec<u8>>>, max_vectors: usize)
         -> (Vec<f32>, Vec<bool>)
     {
-        let trie = self.trie.lock().unwrap();
+        let trie = self.trie.read().unwrap();
         let b_size = batch_addresses.len();
         let d = self.d_model;
         let mut vec_data = vec![0.0f32; b_size * max_vectors * d];
@@ -267,18 +268,18 @@ impl MemorySystem {
     }
 
     pub fn flush(&self) {
-        let trie = self.trie.lock().unwrap();
+        let trie = self.trie.read().unwrap();
         let data = trie.serialize();
         drop(trie);
         fs::write(&self.bin_path, data).ok();
     }
 
     pub fn reset(&self) {
-        let mut trie = self.trie.lock().unwrap();
+        let mut trie = self.trie.write().unwrap();
         trie.reset();
         *self.write_count.lock().unwrap() = 0;
     }
 
-    pub fn total_nodes(&self) -> usize { self.trie.lock().unwrap().total_nodes() }
-    pub fn total_entries(&self) -> u64 { self.trie.lock().unwrap().n_records }
+    pub fn total_nodes(&self) -> usize { self.trie.read().unwrap().total_nodes() }
+    pub fn total_entries(&self) -> u64 { self.trie.read().unwrap().n_records }
 }
