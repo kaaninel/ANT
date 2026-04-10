@@ -48,6 +48,19 @@ pub const MEM_EMA_ALPHA_MIN: f32 = 0.001;
 pub const MEM_DEPTH_CAP: usize = 8;
 pub const MEM_FLUSH_INTERVAL: u64 = 1000;
 
+/// Blend weight for next-token embedding in write address computation.
+///
+/// write_addr_input = hidden[t] + MEM_WRITE_NEXT_TOK_ALPHA * embed(next_tok[t])
+///
+/// This makes write addresses forward-looking: the trie slot for hidden[t] is
+/// written at the address that naturally encodes "hidden[t] followed by next_tok".
+/// During inference, the model's own predicted next token (argmax of logits[t])
+/// is used as the proxy, keeping train/inference distributions aligned.
+///
+/// 0.0 = current behaviour (no next-token conditioning).
+/// 0.5 = moderate conditioning (recommended default).
+pub const MEM_WRITE_NEXT_TOK_ALPHA: f32 = 0.5;
+
 // ---------------------------------------------------------------------------
 // Training inner-loop configuration
 // ---------------------------------------------------------------------------

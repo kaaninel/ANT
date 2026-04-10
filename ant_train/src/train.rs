@@ -401,6 +401,7 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
         // Each inner step calls backward immediately to free the computation graph.
         // Loss is scaled by 1/inner_steps so the total gradient magnitude is correct.
         let mut last_hidden: Option<Tensor> = None;
+        let mut last_target: Option<Tensor> = None;
         let mut inner_lm = 0.0f32;
         let mut inner_contr = 0.0f32;
         let mut inner_depth = 0.0f32;
@@ -453,15 +454,18 @@ pub fn phase_b(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
             // Backward immediately — frees this step's computation graph before next inner step
             opt.backward_step(&inner_loss_scaled)?;
             last_hidden = Some(hidden);
+            last_target = Some(target);
         }
 
         if skip_step { step += 1; continue; }
 
         // ── Trie write: extract CPU data on main thread, then fire-and-forget ──
+        // Pass target ids for next-token conditioned write addresses.
         if let Some(h) = last_hidden {
-            match engine.extract_write_data(&h, temperature, &mut rng) {
+            let ntids = last_target.as_ref().map(|t| t.as_ref());
+            match engine.extract_write_data(&h, temperature, ntids, &mut rng) {
                 Ok(write_data) => engine.spawn_async_write(write_data),
-                Err(_) => { let _ = engine.write_hidden(&h, temperature, &mut rng); }
+                Err(_) => { let _ = engine.write_hidden(&h, temperature, ntids, &mut rng); }
             }
         }
 
@@ -577,6 +581,7 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
         // ── Inner gradient loop ──
         // Each inner step calls backward immediately — no graph accumulation across steps.
         let mut last_hidden: Option<Tensor> = None;
+        let mut last_target: Option<Tensor> = None;
         let scale = 1.0 / cfg.inner_steps as f64;
         let mut skip_step = false;
 
@@ -613,15 +618,17 @@ pub fn phase_c(engine: &mut ANTEngine, cfg: &TrainConfig, vms: &ModelVarMaps,
             // Backward immediately — frees this step's graph before the next inner step
             opt.backward_step(&l_scaled)?;
             last_hidden = Some(hidden);
+            last_target = Some(target);
         }
 
         if skip_step { step += 1; continue; }
 
         // ── Trie write: extract CPU data on main thread, then fire-and-forget ──
         if let Some(h) = last_hidden {
-            match engine.extract_write_data(&h, 1.0, &mut rng) {
+            let ntids = last_target.as_ref().map(|t| t.as_ref());
+            match engine.extract_write_data(&h, 1.0, ntids, &mut rng) {
                 Ok(write_data) => engine.spawn_async_write(write_data),
-                Err(_) => { let _ = engine.write_hidden(&h, 1.0, &mut rng); }
+                Err(_) => { let _ = engine.write_hidden(&h, 1.0, ntids, &mut rng); }
             }
         }
 

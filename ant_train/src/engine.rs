@@ -4,7 +4,7 @@
 /// Inference: true per-token generate() with live trie updates.
 
 use std::sync::Arc;
-use candle_core::{Device, Result, Tensor, DType};
+use candle_core::{Device, Result, Tensor, DType, Module, IndexOp};
 use rand::Rng;
 
 use crate::config::*;
@@ -91,7 +91,14 @@ impl ANTEngine {
     }
 
     /// Write hidden states (B, d) to trie at AddrNet addresses.
-    pub fn write_memory(&self, hidden: &Tensor, temperature: f32, rng: &mut impl Rng)
+    ///
+    /// `next_tokens`: optional (B,) u32 tensor of next-token ids.
+    /// When provided, the address input is blended:
+    ///   addr_input = hidden + MEM_WRITE_NEXT_TOK_ALPHA * embed(next_tok)
+    /// This makes write addresses forward-looking so future reads hit more
+    /// relevant trie slots. Use argmax(logits) as proxy during inference.
+    pub fn write_memory(&self, hidden: &Tensor, temperature: f32,
+                        next_tokens: Option<&Tensor>, rng: &mut impl Rng)
         -> Result<()>
     {
         let values = self.model.compute_value(hidden)?; // (B, d)
@@ -103,21 +110,33 @@ impl ANTEngine {
             .collect();
         if !valid.iter().any(|&v| v) { return Ok(()); }
 
-        let filtered_hidden = if valid.iter().all(|&v| v) {
-            hidden.clone()
+        // Blend hidden with next-token embedding for forward-looking addresses
+        let addr_hidden = if MEM_WRITE_NEXT_TOK_ALPHA > 0.0 {
+            if let Some(next_tok) = next_tokens {
+                let next_embed = self.model.embed.forward(next_tok)?; // (B, d)
+                let blended = hidden.add(&(next_embed * MEM_WRITE_NEXT_TOK_ALPHA as f64)?)?;
+                blended.detach()
+            } else {
+                hidden.detach()
+            }
         } else {
-            // Filter to valid rows
+            hidden.detach()
+        };
+
+        let filtered_addr_hidden = if valid.iter().all(|&v| v) {
+            addr_hidden
+        } else {
             let indices: Vec<usize> = valid.iter().enumerate()
                 .filter_map(|(i, &v)| if v { Some(i) } else { None })
                 .collect();
             let rows: Vec<Tensor> = indices.iter()
-                .map(|&i| hidden.get(i))
+                .map(|&i| addr_hidden.get(i))
                 .collect::<Result<Vec<_>>>()?;
             Tensor::stack(&rows, 0)?
         };
 
         let addr_tensors = self.model.compute_addresses(
-            &filtered_hidden.detach(), temperature, false, rng)?;
+            &filtered_addr_hidden, temperature, false, rng)?;
         let batch_addrs = Self::addrs_to_bytes(&addr_tensors)?;
 
         let val_refs: Vec<&[f32]> = if valid.iter().all(|&v| v) {
@@ -165,7 +184,11 @@ impl ANTEngine {
 
     /// Extract write data from a (B, T, d) hidden tensor: runs GPU v_proj + AddrNet,
     /// returns CPU-serializable (addrs, values) pairs per token step.
+    ///
+    /// `next_token_ids`: optional (B, T) — when provided, addresses are conditioned
+    /// on the next token embedding (forward-looking writes).
     pub fn extract_write_data(&self, hidden: &Tensor, temperature: f32,
+                               next_token_ids: Option<&Tensor>,
                                rng: &mut impl Rng)
         -> Result<Vec<(Vec<Vec<Vec<u8>>>, Vec<Vec<f32>>)>>
     {
@@ -181,8 +204,26 @@ impl ANTEngine {
             let values = self.model.compute_value(&h_batch)?;
             let values_cpu = values.to_vec2::<f32>()?;
 
+            // Blend with next-token embedding for forward-looking addresses
+            let addr_input = if MEM_WRITE_NEXT_TOK_ALPHA > 0.0 {
+                if let Some(ntids) = next_token_ids {
+                    let mut row: Vec<u32> = Vec::with_capacity(b);
+                    for bi in 0..b {
+                        let tok = ntids.get(bi)?.get(ti.min(t - 1))?.to_scalar::<u32>()?;
+                        row.push(tok.min(VOCAB_SIZE as u32 - 1));
+                    }
+                    let t_tensor = Tensor::from_vec(row, (b,), &self.device)?;
+                    let next_embed = self.model.embed.forward(&t_tensor)?;
+                    (&h_batch).add(&(next_embed * MEM_WRITE_NEXT_TOK_ALPHA as f64)?)?.detach()
+                } else {
+                    h_batch
+                }
+            } else {
+                h_batch
+            };
+
             let addr_tensors = self.model.compute_addresses(
-                &h_batch, temperature, false, rng)?;
+                &addr_input, temperature, false, rng)?;
             let batch_addrs = Self::addrs_to_bytes(&addr_tensors)?;
 
             token_data.push((batch_addrs, values_cpu));
@@ -253,19 +294,41 @@ impl ANTEngine {
 
     /// Write a full (B, T, d) hidden tensor to the trie — one write per token.
     ///
+    /// `next_token_ids`: optional (B, T) target ids. When provided, each token's write
+    /// address is conditioned on the corresponding next token:
+    ///   addr_input[t] = hidden[t] + alpha * embed(next_tok[t])
+    /// Pass `target_ids` from the supervised batch here. For the final token of the
+    /// sequence (no known next), the last entry of next_token_ids wraps or is zero.
+    ///
     /// Use this once per trie cycle after the inner gradient loop completes.
     pub fn write_hidden(&self, hidden: &Tensor, temperature: f32,
+                        next_token_ids: Option<&Tensor>,
                         rng: &mut impl Rng) -> Result<()>
     {
         let (b, t, _) = hidden.dims3()?;
         for ti in 0..t {
             let mut h_rows: Vec<Tensor> = Vec::with_capacity(b);
             for bi in 0..b {
-                let h_t = hidden.get(bi)?.get(ti)?.unsqueeze(0)?;
-                h_rows.push(h_t);
+                h_rows.push(hidden.get(bi)?.get(ti)?.unsqueeze(0)?);
             }
-            let h_batch = Tensor::cat(&h_rows, 0)?;
-            self.write_memory(&h_batch.detach(), temperature, rng)?;
+            let h_batch = Tensor::cat(&h_rows, 0)?.detach();
+
+            // Extract next-token ids for this timestep if available
+            let next_tok_t = if let Some(ntids) = next_token_ids {
+                // ntids: (B, T) — take column ti, clamp to vocab
+                let mut row: Vec<u32> = Vec::with_capacity(b);
+                for bi in 0..b {
+                    let tok = ntids.get(bi)?.get(ti.min(t - 1))?.to_scalar::<u32>()?;
+                    row.push(tok.min(VOCAB_SIZE as u32 - 1));
+                }
+                let t_tensor = Tensor::from_vec(row, (b,), &self.device)?;
+                Some(t_tensor)
+            } else {
+                None
+            };
+
+            self.write_memory(&h_batch, temperature,
+                              next_tok_t.as_ref(), rng)?;
         }
         Ok(())
     }
@@ -316,7 +379,7 @@ impl ANTEngine {
         let last_hidden = Tensor::cat(&last_rows, 0)?; // (B, d)
         self.tag_register = Some(last_hidden.detach());
 
-        // Write to trie
+        // Write to trie — use argmax(logits[ti]) as next-token proxy for forward-looking addresses
         if write_to_trie {
             let t = hidden.dim(1)?;
             for ti in 0..t {
@@ -326,7 +389,10 @@ impl ANTEngine {
                     h_rows.push(h_t);
                 }
                 let h_batch = Tensor::cat(&h_rows, 0)?; // (B, d)
-                self.write_memory(&h_batch.detach(), temperature, rng)?;
+                // Proxy next token: argmax of logits at this timestep
+                let proxy_next = logits.i((.., ti, ..))?.argmax(1)?.to_dtype(DType::U32)?;
+                self.write_memory(&h_batch.detach(), temperature,
+                                  Some(&proxy_next), rng)?;
             }
         }
 
@@ -357,11 +423,12 @@ impl ANTEngine {
             &prompt, Some(&mk), Some(&mv), Some(&mm),
             self.tag_register.as_ref(), Some(&mut cache))?;
 
-        // Write prompt tokens to trie
+        // Write prompt tokens to trie — use logits argmax as next-token proxy
         let t = hidden.dim(1)?;
         for ti in 0..t {
             let h_t = hidden.get(0)?.get(ti)?.unsqueeze(0)?;
-            self.write_memory(&h_t, temperature, rng)?;
+            let proxy_next = logits.i((0, ti, ..))?.unsqueeze(0)?.argmax(1)?.to_dtype(DType::U32)?;
+            self.write_memory(&h_t, temperature, Some(&proxy_next), rng)?;
         }
 
         let tag_last = hidden.get(0)?.get(t - 1)?.unsqueeze(0)?.detach();
@@ -383,9 +450,10 @@ impl ANTEngine {
                 &tok, Some(&mk), Some(&mv), Some(&mm),
                 self.tag_register.as_ref(), Some(&mut cache))?;
 
-            // Write to trie
+            // Write to trie — use sampled next token as proxy
             let h0 = hidden.get(0)?.get(0)?.unsqueeze(0)?;
-            self.write_memory(&h0.detach(), temperature, rng)?;
+            let next_tok_proxy = Tensor::from_vec(vec![next_token], (1,), device)?;
+            self.write_memory(&h0.detach(), temperature, Some(&next_tok_proxy), rng)?;
 
             // Update tag register
             self.tag_register = Some(h0.detach());
